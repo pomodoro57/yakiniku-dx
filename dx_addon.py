@@ -38,6 +38,8 @@ MENU_CODES = {
     # セット
     "S1": ("神戸ビーフセット", 21000),
     "S2": ("神戸ビーフセット スペシャル", 41000),
+    "S3": ("特選三種", 9000),
+    "S4": ("上物三種", 6000),
     # 野菜・ナムル
     "G1": ("チシャ菜", 380), "G2": ("キャベツ", 380),
     "G3": ("サラダ", 600), "G4": ("ナムル盛合せ", 600),
@@ -189,7 +191,20 @@ OCR_PROMPT_TEMPLATE = """あなたは焼肉店「新恵」の手書き伝票を�
    読めない場合は "?" にしてください。**推測で存在しないコードを作らないこと。**
 4. 金額が読み取れる場合は、コード表の価格と照合してください。
    食い違う場合は、金額のほうを信じてコードを再検討してください。
-5. 数量が明記されていない場合は 1 とします。
+5. 【数量の読み取り｜最重要】数量は「正の字」（画数で数える方式）で書かれています。
+   線の本数（画数）を数えて数量としてください。
+   - 横棒1本「一」= 1
+   - 2画 = 2、3画 = 3、4画 = 4
+   - 「正」の字（5画）= 5。以降、正の字1つごとに +5（正一 = 6、正正 = 10）
+   数量が何も書かれていない行は 1 としてください。
+5b. 【数量の検算｜必須】正の字は画数を数えるため誤りやすい表記です。
+   各行に金額が書かれている場合は、必ず次で検算してください。
+   　数量 ≒ その行の金額 ÷ コード表のその品の単価
+   画数から数えた数量と、金額から計算した数量が食い違う場合は、
+   **金額から計算した数量を優先**し、confidence を "low" にしてください。
+   （例：生ビール380ml=単価600円。金額が2400円なら 2400÷600=4 → 数量4）
+5c. 数量に少しでも迷いがある行は、confidence を "low" にしてください。
+   数量は人間が最終確認します。自信のない数量を high にしないこと。
 6. コードが書かれておらず料理名だけの場合は、料理名から該当コードを判断してください。
 7. 来店時間は 24時間表記の "HH:MM" で出力してください（例: 19:30）。
    「7時半」のような表記でも、営業時間から判断して 19:30 としてください。
@@ -324,7 +339,7 @@ def validate_ocr(result):
 #    精度が測れなかった。同じ失敗を繰り返さないこと。
 # ============================================================
 
-ACCURACY_LOG = Path("ocr_accuracy_log.csv")
+ACCURACY_LOG = Path(__file__).parent / "ocr_accuracy_log.csv"
 
 LOG_COLUMNS = [
     "記録日時", "顧客グループID", "画像名",
@@ -415,7 +430,7 @@ def log_reading(group_id, image_name, ai_items, final_items, elapsed_sec=None):
 #   教員コメント3️⃣「曜日や時間帯への言及が不足」への回答データになる。
 # ------------------------------------------------------------
 
-VISIT_TIME_LOG = Path("visit_times.csv")
+VISIT_TIME_LOG = Path(__file__).parent / "visit_times.csv"
 
 VISIT_TIME_COLUMNS = [
     "顧客グループID", "来店日", "来店時間", "時間帯",
@@ -672,17 +687,27 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
     table_num = c3.text_input(
         "テーブル番号", value=str(header.get("table_num") or ""), key=f"bt_{idx}")
 
-    # 国籍：AIが読んだ6区分コードを、既存の14区分リストに対応づける
+    # 国籍：6区分コード（J/C/K/A/W/O）で選択・保存する。
+    # app.py から渡される nationalities が6区分コードのリストの場合はそれを使い、
+    # 旧14ヶ国名リストが渡された場合でも動くよう後方互換をとる。
+    _nat_codes = list(NATIONALITY_GROUPS.keys())  # ["J","C","K","A","W","O"]
+    if all(n in NATIONALITY_GROUPS for n in nationalities):
+        # app.py が6区分コードのリストを渡してきた（想定どおり）
+        _nat_options = list(nationalities)
+    else:
+        # 旧国名リストが渡された場合のフォールバック
+        _nat_options = _nat_codes
+
+    # AIが読んだ6区分コードをそのまま初期選択にする
     ai_nat_code = header.get("nationality_code")
     nat_index = 0
-    if ai_nat_code in NATIONALITY_GROUPS:
-        candidates = NATIONALITY_GROUPS[ai_nat_code][1]
-        for cand in candidates:
-            if cand in nationalities:
-                nat_index = nationalities.index(cand)
-                break
+    if ai_nat_code in _nat_options:
+        nat_index = _nat_options.index(ai_nat_code)
+
     nationality = c4.selectbox(
-        "国籍", nationalities, index=nat_index, key=f"bn_{idx}",
+        "国籍", _nat_options, index=nat_index, key=f"bn_{idx}",
+        format_func=lambda c: f"{c} {NATIONALITY_GROUPS[c][0]}"
+            if c in NATIONALITY_GROUPS else str(c),
         help=f"AIの読み取り: {ai_nat_code or '不明'}")
 
     people_default = header.get("num_people") or st.session_state.get("batch_last_people", 2)
@@ -707,7 +732,7 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
         menu_items = [
             (name_of(r["コード"]),
              int(r["数量"]),
-             all_menus.get(name_of(r["コード"]), price_of(r["コード"])))
+             (all_menus.get(name_of(r["コード"]), price_of(r["コード"])) or 0) * int(r["数量"]))
             for _, r in valid.iterrows()
         ]
         add_order(visit_date, table_num, nationality, num_people,
