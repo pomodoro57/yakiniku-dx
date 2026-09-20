@@ -10,9 +10,10 @@ import uuid
 import io
 import json
 import re
-import time
 from datetime import date, datetime
-import dx_addon as dx
+import time
+
+import dx_addon as dx   # 追加モジュール（コード表・精度ログ・一括読み取り）
 
 # google-generativeai はオプション（インストール済みの場合のみOCR機能が有効）
 try:
@@ -26,24 +27,53 @@ except ImportError:
 # 定数・設定
 # ============================================================
 
-CSV_FILE   = "yakiniku_orders.csv"
-EXCEL_FILE = "yakiniku_orders.xlsx"
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE   = os.path.join(BASE_DIR, "yakiniku_orders.csv")
+EXCEL_FILE = os.path.join(BASE_DIR, "yakiniku_orders.xlsx")
 
-NATIONALITIES = [
-    "日本", "アメリカ", "中国", "韓国", "台湾",
-    "香港", "タイ", "シンガポール", "フランス", "ドイツ",
-    "イギリス", "オーストラリア", "カナダ", "その他"
-]
+# Gemini モデル名（モデル更新時はここだけ変更すればよい）
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+# 国籍6区分コード（中間報告No.04 成果物B と統一。dx_addon.py の NATIONALITY_GROUPS と同一）
+# 保存する値はコード1文字。伝票の国籍コード・AI読み取り・分析レポートとすべて一致させる。
+NATIONALITY_CODES = ["J", "C", "K", "A", "W", "O"]
+
+NATIONALITY_LABELS = {
+    "J": "日本",
+    "C": "中国系",
+    "K": "韓国",
+    "A": "他アジア",
+    "W": "欧米",
+    "O": "その他・不明",
+}
+
+# 旧14国名 → 6区分コード（既存CSVを表示・編集する際の後方互換）
+_LEGACY_NATIONALITY_TO_CODE = {
+    "日本": "J",
+    "中国": "C", "台湾": "C", "香港": "C", "マカオ": "C", "中国系": "C",
+    "韓国": "K",
+    "タイ": "A", "シンガポール": "A", "ベトナム": "A", "フィリピン": "A",
+    "インドネシア": "A", "マレーシア": "A", "インド": "A", "他アジア": "A",
+    "アメリカ": "W", "カナダ": "W", "イギリス": "W", "フランス": "W",
+    "ドイツ": "W", "オーストラリア": "W", "ニュージーランド": "W",
+    "スイス": "W", "イタリア": "W", "スペイン": "W", "オランダ": "W", "欧米": "W",
+    "その他": "O", "不明": "O", "": "O", "その他・不明": "O",
+}
+
+def to_nationality_code(value):
+    """CSVに入っている値（旧国名 or 新コード）を6区分コードに正規化する。"""
+    if value in NATIONALITY_LABELS:      # すでにコード（J/C/K/A/W/O）
+        return value
+    return _LEGACY_NATIONALITY_TO_CODE.get(str(value).strip(), "O")
+
+def nationality_display(code):
+    """コード → 「J 日本」形式の表示文字列。"""
+    c = to_nationality_code(code)
+    return f"{c} {NATIONALITY_LABELS[c]}"
 
 VISIT_ROUTES = [
     "Google Maps", "食べログ", "TripAdvisor", "Instagram",
     "口コミ（知人紹介）", "ホテルフロント", "旅行会社", "その他"
-]
-
-VISIT_HOURS = [
-    "11:00〜12:00", "12:00〜13:00", "13:00〜14:00", "14:00〜15:00",
-    "15:00〜16:00", "16:00〜17:00", "17:00〜18:00", "18:00〜19:00",
-    "19:00〜20:00", "20:00〜21:00", "21:00〜22:00", "22:00〜23:00",
 ]
 
 # 生ビール大の価格: 来店日が2026/6/1以前→¥800、6/2以降→¥950（visit_date確定後に動的計算）
@@ -153,6 +183,7 @@ ALL_MENUS = {name: price for items in MENU_PRESETS.values() for name, price in i
 # データ管理関数
 # ============================================================
 
+@st.cache_data
 def load_data():
     if os.path.exists(CSV_FILE):
         df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
@@ -160,11 +191,9 @@ def load_data():
             df["顧客グループID"] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
         if "テーブル番号" not in df.columns:
             df["テーブル番号"] = ""
-        if "来店時間帯" not in df.columns:
-            df["来店時間帯"] = ""
         return df
     return pd.DataFrame(columns=[
-        "日付", "来店時間帯", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
+        "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
         "来店経路", "顧客グループID", "登録日時"
     ])
 
@@ -176,15 +205,16 @@ def save_data(df):
             f.write(generate_excel(df))
     except Exception as e:
         st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
+    # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
+    load_data.clear()
 
 
-def add_order(visit_date, visit_hour, table_num, nationality, num_people, menu_items, visit_route, group_id):
+def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id):
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = [
         {
             "日付":           str(visit_date),
-            "来店時間帯":     visit_hour,
             "テーブル番号":   table_num,
             "国籍":           nationality,
             "人数":           num_people,
@@ -209,12 +239,14 @@ def delete_group(group_id):
 # 分析関数
 # ============================================================
 
+@st.cache_data
 def calc_sales_by_nationality(df):
     if df.empty:
         return pd.DataFrame()
     return df.groupby("国籍")["金額"].sum().reset_index().rename(columns={"金額": "売上合計(円)"})
 
 
+@st.cache_data
 def calc_popular_menu_by_nationality(df, nationality):
     if df.empty:
         return pd.DataFrame()
@@ -227,6 +259,7 @@ def calc_popular_menu_by_nationality(df, nationality):
     ).reset_index().sort_values("注文数", ascending=False)
 
 
+@st.cache_data
 def calc_avg_spend_per_person(df):
     if df.empty:
         return pd.DataFrame()
@@ -261,15 +294,24 @@ def generate_excel(df):
 # ============================================================
 
 def ocr_receipt_with_gemini(image_bytes, api_key):
+    """
+    コード方式のOCR。
+    メニューコード表・国籍コード表をプロンプトに渡すため、
+    AIの仕事は「手書き文字を推測する」から「既知のコードから選ぶ」に変わる。
+    戻り値は辞書（visit_date / visit_time / table_num / num_people /
+    nationality_code / items / total / header_confidence）。
+    """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel(GEMINI_MODEL)
     img = Image.open(io.BytesIO(image_bytes))
     response = model.generate_content([dx.build_ocr_prompt(), img])
     return dx.parse_ocr_response(response.text)
 
 
 def match_menu_to_presets(ocr_result):
+    """新形式（辞書）・旧形式（配列）どちらでも受け取れる。"""
     items = ocr_result.get("items", []) if isinstance(ocr_result, dict) else ocr_result
+
     matched, unmatched = [], []
     for item in items:
         code = item.get("code", "")
@@ -304,17 +346,11 @@ if "ocr_results" not in st.session_state:
 if "ocr_unmatched" not in st.session_state:
     st.session_state.ocr_unmatched = []
 
-if "ocr_raw" not in st.session_state:
-    st.session_state.ocr_raw = []
-
-if "ocr_header" not in st.session_state:
-    st.session_state.ocr_header = {}
-
-if "ocr_image" not in st.session_state:
-    st.session_state.ocr_image = ""
-
-if "ocr_elapsed" not in st.session_state:
-    st.session_state.ocr_elapsed = None
+# 精度ログ用：AIの生出力・画像名・所要時間を保持する
+for _k, _v in [("ocr_raw", []), ("ocr_image", ""), ("ocr_elapsed", None),
+               ("ocr_header", {})]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 # ============================================================
 # ページ設定
@@ -337,14 +373,19 @@ st.sidebar.header("📝 注文入力")
 st.sidebar.markdown("---")
 
 st.sidebar.subheader("来店情報")
-visit_date  = st.sidebar.date_input("📅 来店日", value=date.today())
-# 来店日が2026/6/1以前なら¥800、6/2以降なら¥950
-beer_large_price = 800 if visit_date <= date(2026, 6, 1) else 950
-visit_hour  = st.sidebar.selectbox("🕐 来店時間帯", options=VISIT_HOURS)
-table_num   = st.sidebar.text_input("🪑 テーブル番号", placeholder="例：3、A-2")
-nationality = st.sidebar.selectbox("🌍 国籍", options=NATIONALITIES)
-num_people  = st.sidebar.number_input("👥 人数（名）", min_value=1, max_value=20, value=2, step=1)
-visit_route = st.sidebar.selectbox("📍 来店経路", options=VISIT_ROUTES)
+with st.sidebar.form("sidebar_form"):
+    visit_date  = st.date_input("📅 来店日", value=date.today())
+    # 来店日が2026/6/1以前なら¥800、6/2以降なら¥950
+    beer_large_price = 800 if visit_date <= date(2026, 6, 1) else 950
+    table_num   = st.text_input("🪑 テーブル番号", placeholder="例：3、A-2")
+    nationality = st.selectbox(
+        "🌍 国籍",
+        options=NATIONALITY_CODES,
+        format_func=lambda c: nationality_display(c),
+    )
+    num_people  = st.number_input("👥 人数（名）", min_value=1, max_value=20, value=2, step=1)
+    visit_route = st.selectbox("📍 来店経路", options=VISIT_ROUTES)
+    st.form_submit_button("反映")
 
 st.sidebar.markdown("---")
 
@@ -377,21 +418,20 @@ else:
         st.sidebar.image(uploaded_img, caption="アップロード画像", use_container_width=True)
 
         if st.sidebar.button("🔍 AIで伝票を読み取る", use_container_width=True, type="primary"):
+            _t0 = time.time()
             with st.spinner("AI読み取り中..."):
                 try:
-                    _t0 = time.time()
                     image_bytes = uploaded_img.read()
-                    ocr_result  = ocr_receipt_with_gemini(image_bytes, gemini_api_key)
+                    ocr_result = ocr_receipt_with_gemini(image_bytes, gemini_api_key)
                     matched, unmatched = match_menu_to_presets(ocr_result)
                     st.session_state.ocr_results   = matched
                     st.session_state.ocr_unmatched = unmatched
-                    st.session_state.ocr_raw       = ocr_result.get("items", []) if isinstance(ocr_result, dict) else []
-                    st.session_state.ocr_header    = ocr_result if isinstance(ocr_result, dict) else {}
+                    st.session_state.ocr_raw       = (
+                        ocr_result.get("items", []) if isinstance(ocr_result, dict) else ocr_result)
+                    st.session_state.ocr_header    = (
+                        ocr_result if isinstance(ocr_result, dict) else {})
                     st.session_state.ocr_image     = uploaded_img.name
                     st.session_state.ocr_elapsed   = time.time() - _t0
-                    # 警告表示
-                    for w in dx.validate_ocr(ocr_result):
-                        st.sidebar.warning(w)
                     st.sidebar.success(f"✅ {len(matched)} 品目を読み取りました")
                     if unmatched:
                         st.sidebar.warning(f"⚠️ {len(unmatched)} 品目はメニューに見つかりませんでした")
@@ -403,6 +443,23 @@ else:
     if st.session_state.ocr_results is not None:
         st.sidebar.markdown("---")
         st.sidebar.markdown("#### 📋 読み取り結果（確認）")
+
+        # コード表・金額との照合による警告
+        _warn_src = st.session_state.get("ocr_header") or st.session_state.get("ocr_raw", [])
+        for _w in dx.validate_ocr(_warn_src):
+            st.sidebar.warning(_w)
+
+        # AIが読み取った来店情報（サイドバー上部の入力欄と違えば知らせる）
+        _h = st.session_state.get("ocr_header", {})
+        if _h:
+            _bits = []
+            if _h.get("visit_date"):       _bits.append(f"日付 {_h['visit_date']}")
+            if _h.get("visit_time"):       _bits.append(f"時間 {_h['visit_time']}")
+            if _h.get("table_num"):        _bits.append(f"卓 {_h['table_num']}")
+            if _h.get("num_people"):       _bits.append(f"{_h['num_people']}名")
+            if _h.get("nationality_code"): _bits.append(f"国籍 {_h['nationality_code']}")
+            if _bits:
+                st.sidebar.info("AIが読んだ来店情報： " + " / ".join(_bits))
 
         confirmed_items = []
         for idx, item in enumerate(st.session_state.ocr_results):
@@ -544,28 +601,29 @@ else:
     if st.sidebar.button("💾 このグループを保存", type="primary", use_container_width=True):
         group_id   = str(uuid.uuid4())[:8]
         menu_items = [(i["menu_name"], i["quantity"], i["quantity"] * i["unit_price"]) for i in st.session_state.cart]
-        add_order(visit_date, visit_hour, table_num, nationality, num_people, menu_items, visit_route, group_id)
+        add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id)
 
-        # 3-6: 精度ログを記録（AIで読み取った場合のみ）
+        # 【最重要】AIの出力と人の修正結果を両方記録する。
+        # この差分が読み取り精度そのものであり、12月の比較根拠になる。
         if st.session_state.get("ocr_raw"):
             dx.log_reading(
-                group_id   = group_id,
-                image_name = st.session_state.get("ocr_image", ""),
-                ai_items   = st.session_state.get("ocr_raw", []),
-                final_items= [{"menu_name": i["menu_name"], "quantity": i["quantity"]}
+                group_id    = group_id,
+                image_name  = st.session_state.get("ocr_image", ""),
+                ai_items    = st.session_state.get("ocr_raw", []),
+                final_items = [{"menu_name": i["menu_name"], "quantity": i["quantity"]}
                                for i in st.session_state.cart],
-                elapsed_sec= st.session_state.get("ocr_elapsed"),
+                elapsed_sec = st.session_state.get("ocr_elapsed"),
             )
-            # 来店時間ログ（7月以降の伝票に記載あり）
-            _vt = (st.session_state.get("ocr_header") or {}).get("visit_time")
-            if _vt:
-                dx.log_visit_time(group_id, visit_date, _vt, table_num, nationality, num_people)
-            # ログ用セッションをリセット
-            st.session_state.ocr_raw     = []
-            st.session_state.ocr_header  = {}
-            st.session_state.ocr_image   = ""
-            st.session_state.ocr_elapsed = None
+        # 来店時間（1〜6月の伝票には無いため、7月以降のみ蓄積される）
+        _vt = (st.session_state.get("ocr_header") or {}).get("visit_time")
+        if _vt:
+            dx.log_visit_time(group_id, visit_date, _vt, table_num,
+                              nationality, num_people)
 
+        st.session_state.ocr_raw     = []
+        st.session_state.ocr_header  = {}
+        st.session_state.ocr_image   = ""
+        st.session_state.ocr_elapsed = None
         st.session_state.cart = []
         st.sidebar.success(f"✅ 保存しました！（ID: {group_id}）")
         st.rerun()
@@ -580,12 +638,14 @@ else:
 
 df = load_data()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 データ一覧",
     "👥 顧客グループ管理",
     "📊 国籍別売上",
     "🏆 人気メニュー",
-    "💰 平均客単価"
+    "💰 平均客単価",
+    "📦 一括読み取り",
+    "🎯 読み取り精度"
 ])
 
 # タブ1：データ一覧
@@ -596,7 +656,7 @@ with tab1:
     else:
         c1, c2, c3 = st.columns(3)
         c1.metric("総レコード数", f"{len(df)} 件")
-        c2.metric("来店国籍数",   f"{df['国籍'].nunique()} 国")
+        c2.metric("来店区分数",   f"{df['国籍'].apply(to_nationality_code).nunique()} 区分")
         c3.metric("総売上",       f"¥{df['金額'].sum():,}")
         st.markdown("---")
         filt = st.multiselect("🔍 国籍フィルター", options=df["国籍"].unique(), default=[])
@@ -658,51 +718,53 @@ with tab2:
 
                 if st.session_state.editing_group == gid:
                     st.markdown("#### ✏️ 編集中")
-                    ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
-                    edit_date  = ec1.date_input("来店日", value=pd.to_datetime(row["日付"]).date(), key=f"edate_{gid}")
-                    cur_hour   = row.get("来店時間帯", VISIT_HOURS[7])
-                    edit_hour  = ec2.selectbox("来店時間帯", VISIT_HOURS,
-                                    index=VISIT_HOURS.index(cur_hour) if cur_hour in VISIT_HOURS else 7,
-                                    key=f"ehour_{gid}")
-                    edit_tbl   = ec3.text_input("テーブル番号", value=str(row.get("テーブル番号", "") or ""), key=f"etbl_{gid}")
-                    edit_nat   = ec4.selectbox("国籍", NATIONALITIES,
-                                    index=NATIONALITIES.index(row["国籍"]) if row["国籍"] in NATIONALITIES else 0,
-                                    key=f"enat_{gid}")
-                    edit_ppl   = ec5.number_input("人数", min_value=1, max_value=20,
-                                    value=int(row["人数"]), key=f"eppl_{gid}")
-                    edit_route = ec6.selectbox("来店経路", VISIT_ROUTES,
-                                    index=VISIT_ROUTES.index(row["来店経路"]) if row["来店経路"] in VISIT_ROUTES else 0,
-                                    key=f"eroute_{gid}")
+                    with st.form(f"group_form_{gid}"):
+                        ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                        edit_date  = ec1.date_input("来店日", value=pd.to_datetime(row["日付"]).date(), key=f"edate_{gid}")
+                        edit_tbl   = ec2.text_input("テーブル番号", value=str(row.get("テーブル番号", "") or ""), key=f"etbl_{gid}")
+                        _cur_code = to_nationality_code(row["国籍"])
+                        edit_nat   = ec3.selectbox("国籍", NATIONALITY_CODES,
+                                        index=NATIONALITY_CODES.index(_cur_code),
+                                        format_func=lambda c: nationality_display(c),
+                                        key=f"enat_{gid}")
+                        edit_ppl   = ec4.number_input("人数", min_value=1, max_value=20,
+                                        value=int(row["人数"]), key=f"eppl_{gid}")
+                        edit_route = ec5.selectbox("来店経路", VISIT_ROUTES,
+                                        index=VISIT_ROUTES.index(row["来店経路"]) if row["来店経路"] in VISIT_ROUTES else 0,
+                                        key=f"eroute_{gid}")
 
-                    st.markdown("**注文明細**（数量を変更できます）")
-                    edited_rows = []
-                    orig_indices = gdf.index.tolist()
-                    for i, orig_idx in enumerate(orig_indices):
-                        r = gdf.loc[orig_idx]
-                        mc1, mc2, mc3 = st.columns([4, 2, 1])
-                        mc1.write(f"**{r['メニュー名']}**　¥{int(r['金額']) // int(r['数量']):,}/個")
-                        new_q = mc2.number_input("数量", min_value=0, max_value=99,
-                                    value=int(r["数量"]), key=f"eq_{gid}_{i}",
-                                    label_visibility="collapsed")
-                        delete_row = mc3.checkbox("削除", key=f"edel_{gid}_{i}")
-                        if not delete_row and new_q > 0:
-                            unit_price = int(r["金額"]) // int(r["数量"])
-                            edited_rows.append({"メニュー名": r["メニュー名"], "数量": new_q, "金額": unit_price * new_q})
+                        st.markdown("**注文明細**（数量を変更できます）")
+                        edited_rows = []
+                        orig_indices = gdf.index.tolist()
+                        for i, orig_idx in enumerate(orig_indices):
+                            r = gdf.loc[orig_idx]
+                            mc1, mc2, mc3 = st.columns([4, 2, 1])
+                            mc1.write(f"**{r['メニュー名']}**　¥{int(r['金額']) // int(r['数量']):,}/個")
+                            new_q = mc2.number_input("数量", min_value=0, max_value=99,
+                                        value=int(r["数量"]), key=f"eq_{gid}_{i}",
+                                        label_visibility="collapsed")
+                            delete_row = mc3.checkbox("削除", key=f"edel_{gid}_{i}")
+                            if not delete_row and new_q > 0:
+                                unit_price = int(r["金額"]) // int(r["数量"])
+                                edited_rows.append({"メニュー名": r["メニュー名"], "数量": new_q, "金額": unit_price * new_q})
 
-                    st.markdown("**メニューを追加する（プリセット）**")
-                    all_menus   = [(name, price) for items in MENU_PRESETS.values() for name, price in items]
-                    menu_labels = [f"{n}　¥{p:,}" for n, p in all_menus]
-                    add_sel = st.selectbox("追加メニュー", ["（追加しない）"] + menu_labels, key=f"eadd_{gid}")
-                    add_qty = st.number_input("追加数量", min_value=1, max_value=99, value=1, key=f"eaddq_{gid}")
+                        st.markdown("**メニューを追加する（プリセット）**")
+                        all_menus   = [(name, price) for items in MENU_PRESETS.values() for name, price in items]
+                        menu_labels = [f"{n}　¥{p:,}" for n, p in all_menus]
+                        add_sel = st.selectbox("追加メニュー", ["（追加しない）"] + menu_labels, key=f"eadd_{gid}")
+                        add_qty = st.number_input("追加数量", min_value=1, max_value=99, value=1, key=f"eaddq_{gid}")
 
-                    st.markdown("**手入力でメニューを追加する**")
-                    hc1, hc2, hc3 = st.columns(3)
-                    manual_add_name  = hc1.text_input("メニュー名", key=f"emanual_name_{gid}")
-                    manual_add_price = hc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key=f"emanual_price_{gid}")
-                    manual_add_qty   = hc3.number_input("数量", min_value=1, max_value=99, value=1, key=f"emanual_qty_{gid}")
+                        st.markdown("**手入力でメニューを追加する**")
+                        hc1, hc2, hc3 = st.columns(3)
+                        manual_add_name  = hc1.text_input("メニュー名", key=f"emanual_name_{gid}")
+                        manual_add_price = hc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key=f"emanual_price_{gid}")
+                        manual_add_qty   = hc3.number_input("数量", min_value=1, max_value=99, value=1, key=f"emanual_qty_{gid}")
 
-                    sc1, sc2 = st.columns(2)
-                    if sc1.button("💾 変更を保存", key=f"esave_{gid}", type="primary"):
+                        sc1, sc2 = st.columns(2)
+                        submitted_save   = sc1.form_submit_button("💾 変更を保存", type="primary")
+                        submitted_cancel = sc2.form_submit_button("❌ キャンセル")
+
+                    if submitted_save:
                         if add_sel != "（追加しない）":
                             sel_idx  = menu_labels.index(add_sel)
                             add_name, add_price = all_menus[sel_idx]
@@ -714,7 +776,6 @@ with tab2:
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         new_rows = [{
                             "日付":           str(edit_date),
-                            "来店時間帯":     edit_hour,
                             "テーブル番号":   edit_tbl,
                             "国籍":           edit_nat,
                             "人数":           edit_ppl,
@@ -730,7 +791,7 @@ with tab2:
                         st.success("✅ 保存しました")
                         st.rerun()
 
-                    if sc2.button("❌ キャンセル", key=f"ecancel_{gid}"):
+                    if submitted_cancel:
                         st.session_state.editing_group = None
                         st.rerun()
 
@@ -835,3 +896,101 @@ with tab5:
 # フッター
 st.markdown("---")
 st.caption("🎓 大学ゼミ研究用プロトタイプ ｜ データは yakiniku_orders.csv に保存されます")
+
+
+# ============================================================
+# タブ6：一括読み取り（AI優先・PC用）
+# 手入力を極力使わず、複数の伝票をまとめて処理する
+# ============================================================
+with tab6:
+    dx.render_batch_tab(
+        st, pd, add_order, ALL_MENUS, NATIONALITY_CODES,
+        VISIT_ROUTES, ocr_receipt_with_gemini,
+        uuid, date, time,
+    )
+
+
+# ============================================================
+# タブ7：読み取り精度
+# AIの出力と人の修正結果の差分から、精度を自動集計する
+# ============================================================
+with tab7:
+    st.subheader("🎯 OCR読み取り精度")
+
+    summary = dx.accuracy_summary()
+    if summary is None:
+        st.info("まだ記録がありません。伝票を読み取って登録すると集計されます。")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "品目単位精度",
+            f"{summary['品目単位精度']:.1%}",
+            delta=f"{(summary['品目単位精度'] - summary['旧方式の理論値']) * 100:+.1f}pt",
+            help="旧方式（金額から逆引き）の理論値との差",
+        )
+        c2.metric("伝票単位精度", f"{summary['伝票単位精度']:.1%}")
+        c3.metric("読み取り品目数", f"{summary['品目数']:,}")
+        c4.metric("伝票枚数", f"{summary['伝票枚数']:,}")
+
+        st.caption(
+            f"旧方式（金額から品目を逆引き）の理論上の正答率は "
+            f"**{summary['旧方式の理論値']:.1%}** です。"
+            "同額の品目が多いため、原理的にそれ以上は上がりません。"
+        )
+
+        st.markdown("#### よく間違えるコード")
+        conf = dx.confusion_table()
+        if len(conf):
+            st.dataframe(conf, use_container_width=True, hide_index=True)
+            st.caption(
+                "特定のペアに偏っていれば、その2つを見分ける指示を "
+                "dx_addon.py のプロンプトに追加できます。"
+            )
+        else:
+            st.success("修正が発生していません。")
+
+        st.markdown("#### 所要時間")
+        _log = dx.load_accuracy_log()
+        _sec = pd.to_numeric(_log["所要秒数"], errors="coerce").dropna()
+        if len(_sec):
+            st.metric("1枚あたり平均", f"{_sec.mean():.1f} 秒")
+            st.caption("⚠️ 30秒を超えると、店舗での運用は現実的ではありません。")
+
+        st.markdown("#### 金額で判別できない品目")
+        st.caption("コード体系を導入した理由。旧方式ではこれらを区別できませんでした。")
+        _rows = [
+            {"価格": f"¥{p:,}", "品数": len(cs), "コード": " ".join(cs)}
+            for p, cs in sorted(dx.same_price_groups().items(), reverse=True)
+        ]
+        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+
+        with open(dx.ACCURACY_LOG, "rb") as _f:
+            st.download_button(
+                "精度ログCSVをダウンロード", _f,
+                file_name="ocr_accuracy_log.csv", mime="text/csv",
+            )
+
+    # ------------------------------------------------------------
+    # 来店時間の分析（7月以降の伝票のみ。1〜6月には時間の記載が無い）
+    # 教員コメント「曜日や時間帯への言及が不足」への回答データ
+    # ------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("#### 🕐 来店時間帯の分析")
+    _vt = dx.load_visit_times()
+    if _vt.empty:
+        st.info("来店時間の記録がまだありません。（1〜6月の伝票には時間の記載がありません）")
+    else:
+        _order = ["〜14時台", "15-16時台", "17-18時台", "19-20時台", "21時以降"]
+        _cnt = _vt["時間帯"].value_counts().reindex(_order).fillna(0).astype(int)
+        st.bar_chart(_cnt)
+
+        st.markdown("##### 時間帯 × 国籍区分")
+        _pivot = pd.crosstab(_vt["時間帯"], _vt["国籍区分"]).reindex(_order).fillna(0).astype(int)
+        st.dataframe(_pivot, use_container_width=True)
+
+        st.markdown("##### 曜日 × 時間帯")
+        _wd = ["月", "火", "水", "木", "金", "土", "日"]
+        _pivot2 = pd.crosstab(_vt["曜日"], _vt["時間帯"])
+        _pivot2 = _pivot2.reindex(index=[d for d in _wd if d in _pivot2.index])
+        _pivot2 = _pivot2.reindex(columns=[c for c in _order if c in _pivot2.columns])
+        st.dataframe(_pivot2, use_container_width=True)
