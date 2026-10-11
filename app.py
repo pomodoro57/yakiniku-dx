@@ -278,6 +278,7 @@ def append_to_spreadsheet(new_rows_df):
 
 @st.cache_data
 def load_data():
+    # PC版：CSVから読み込む
     if os.path.exists(CSV_FILE):
         df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
         if "顧客グループID" not in df.columns:
@@ -285,6 +286,21 @@ def load_data():
         if "テーブル番号" not in df.columns:
             df["テーブル番号"] = ""
         return df
+    # スマホ版（Streamlit Cloud）：スプレッドシートから読み込む
+    client = get_gspread_client()
+    if client is not None:
+        try:
+            sh = client.open_by_key(SPREADSHEET_ID)
+            try:
+                ws = sh.worksheet(SHEET_NAME)
+                data = ws.get_all_values()
+                if len(data) > 1:
+                    df = pd.DataFrame(data[1:], columns=data[0])
+                    return df
+            except Exception:
+                pass
+        except Exception:
+            pass
     return pd.DataFrame(columns=[
         "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
         "来店経路", "顧客グループID", "登録日時"
@@ -298,21 +314,8 @@ def save_data(df):
             f.write(generate_excel(df))
     except Exception as e:
         st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
-    # Googleスプレッドシートにも保存
-    # Streamlit Cloud環境かどうかを判定（/mount/src/ で始まる場合はCloud）
-    is_cloud = (
-        BASE_DIR.startswith("/mount") or
-        BASE_DIR.startswith("/app") or
-        os.environ.get("STREAMLIT_SHARING_MODE") is not None or
-        "gcp_service_account" in st.secrets
-    )
-    if is_cloud:
-        # スマホ版（Streamlit Cloud）は追記
-        success = append_to_spreadsheet(df)
-    else:
-        # PC版は全件上書き
-        success = save_to_spreadsheet(df)
-    if not success:
+    # GoogleスプレッドシートにPC・スマホともに全件上書き
+    if not save_to_spreadsheet(df):
         st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました（CSVには保存済み）")
     # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
     load_data.clear()
