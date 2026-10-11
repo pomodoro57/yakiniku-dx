@@ -15,6 +15,14 @@ import time
 
 import dx_addon as dx   # 追加モジュール（コード表・精度ログ・一括読み取り）
 
+# Google Sheets連携（gspreadがインストール済みの場合のみ有効）
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+
 # google-generativeai はオプション（インストール済みの場合のみOCR機能が有効）
 try:
     import google.generativeai as genai
@@ -30,6 +38,15 @@ except ImportError:
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 CSV_FILE   = os.path.join(BASE_DIR, "yakiniku_orders.csv")
 EXCEL_FILE = os.path.join(BASE_DIR, "yakiniku_orders.xlsx")
+
+# Googleスプレッドシート設定
+SPREADSHEET_ID  = "1FQJT7zJE3-sQOdchxcrohmI6BXUZ-rcyzuIUWAVzYFU"
+SHEET_NAME      = "注文データ"
+SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service_account.json")
+GSPREAD_SCOPES  = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 # Gemini モデル名（モデル更新時はここだけ変更すればよい）
 GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -182,6 +199,55 @@ MENU_PRESETS = {
 ALL_MENUS = {name: price for items in MENU_PRESETS.values() for name, price in items}
 
 # ============================================================
+# Googleスプレッドシート連携関数
+# ============================================================
+
+def get_gspread_client():
+    """サービスアカウントでgspreadクライアントを取得する"""
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        # Streamlit Cloud: secretsからJSON取得
+        if "gcp_service_account" in st.secrets:
+            creds = Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"],
+                scopes=GSPREAD_SCOPES
+            )
+        # PC: JSONファイルから取得
+        elif os.path.exists(SERVICE_ACCOUNT_FILE):
+            creds = Credentials.from_service_account_file(
+                SERVICE_ACCOUNT_FILE,
+                scopes=GSPREAD_SCOPES
+            )
+        else:
+            return None
+        return gspread.authorize(creds)
+    except Exception:
+        return None
+
+
+def save_to_spreadsheet(df):
+    """DataFrameをGoogleスプレッドシートに全件書き込む"""
+    client = get_gspread_client()
+    if client is None:
+        st.error("❌ gspreadクライアントの取得に失敗しました")
+        return False
+    try:
+        sh = client.open_by_key(SPREADSHEET_ID)
+        try:
+            ws = sh.worksheet(SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=20)
+        ws.clear()
+        df_clean = df.fillna("").astype(str)
+        ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
+        return True
+    except Exception as e:
+        st.error(f"❌ スプレッドシート保存エラー: {e}")
+        return False
+
+
+# ============================================================
 # データ管理関数
 # ============================================================
 
@@ -207,6 +273,9 @@ def save_data(df):
             f.write(generate_excel(df))
     except Exception as e:
         st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
+    # Googleスプレッドシートにも保存
+    if not save_to_spreadsheet(df):
+        st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました（CSVには保存済み）")
     # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
     load_data.clear()
 
