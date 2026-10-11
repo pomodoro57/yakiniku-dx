@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # 道頓堀 焼肉 新恵 DX注文管理ツール
 # 実行: python -m streamlit run app.py
 
@@ -48,15 +48,11 @@ GSPREAD_SCOPES  = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# データの正式な列順（これに厳密に合わせることで列のずれを防ぐ）
-COLUMNS_ORDER = [
-    "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
-    "来店経路", "顧客グループID", "登録日時"
-]
-
 # Gemini モデル名（モデル更新時はここだけ変更すればよい）
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
+# 国籍6区分コード（中間報告No.04 成果物B と統一。dx_addon.py の NATIONALITY_GROUPS と同一）
+# 保存する値はコード1文字。伝票の国籍コード・AI読み取り・分析レポートとすべて一致させる。
 NATIONALITY_CODES = ["J", "C", "K", "A", "W", "O"]
 
 NATIONALITY_LABELS = {
@@ -68,6 +64,7 @@ NATIONALITY_LABELS = {
     "O": "その他・不明",
 }
 
+# 旧14国名 → 6区分コード（既存CSVを表示・編集する際の後方互換）
 _LEGACY_NATIONALITY_TO_CODE = {
     "日本": "J",
     "中国": "C", "台湾": "C", "香港": "C", "マカオ": "C", "中国系": "C",
@@ -81,11 +78,13 @@ _LEGACY_NATIONALITY_TO_CODE = {
 }
 
 def to_nationality_code(value):
-    if value in NATIONALITY_LABELS:
+    """CSVに入っている値（旧国名 or 新コード）を6区分コードに正規化する。"""
+    if value in NATIONALITY_LABELS:      # すでにコード（J/C/K/A/W/O）
         return value
     return _LEGACY_NATIONALITY_TO_CODE.get(str(value).strip(), "O")
 
 def nationality_display(code):
+    """コード → 「J 日本」形式の表示文字列。"""
     c = to_nationality_code(code)
     return f"{c} {NATIONALITY_LABELS[c]}"
 
@@ -94,120 +93,131 @@ VISIT_ROUTES = [
     "口コミ（知人紹介）", "ホテルフロント", "旅行会社", "その他"
 ]
 
+# 生ビール大の価格: 来店日が2026/6/1以前→¥800、6/2以降→¥950（visit_date確定後に動的計算）
+
+# ============================================================
+# 道頓堀 焼肉 新恵 メニュープリセット（PDFコード順）
+# ============================================================
 MENU_PRESETS = {
     "🥩 熟成牛肉": [
-        ("特選ロース",    3720),
-        ("上ロース",      2520),
-        ("特選カルビ",    2380),
-        ("上カルビ",      1580),
-        ("特選ハラミ",    2380),
-        ("上ハラミ",      1580),
-        ("特選フィレ",    3380),
+        ("特選ロース",    3720),   # A1
+        ("上ロース",      2520),   # A2
+        ("特選カルビ",    2380),   # A3
+        ("上カルビ",      1580),   # A4
+        ("特選ハラミ",    2380),   # A5
+        ("上ハラミ",      1580),   # A6
+        ("特選フィレ",    3380),   # A7
     ],
     "🫀 ホルモン": [
-        ("タン",          3000),
-        ("うす切りタン",  1200),
-        ("ツラミ",         880),
-        ("ミノ",           680),
-        ("センマイ",       680),
-        ("アカセンマイ",   680),
-        ("シマチョウ",     680),
-        ("ショウチョウ",   680),
-        ("レバー",         680),
+        ("タン",          3000),   # E1
+        ("うす切りタン",  1200),   # E2
+        ("ツラミ",         880),   # E3
+        ("ミノ",           680),   # E4
+        ("センマイ",       680),   # E5
+        ("アカセンマイ",   680),   # E6
+        ("シマチョウ",     680),   # E7
+        ("ショウチョウ",   680),   # E8
+        ("レバー",         680),   # E9
     ],
     "🌟 セット": [
-        ("神戸ビーフセット",           21000),
-        ("神戸ビーフセット スペシャル", 41000),
-        ("特選三種",                    9000),
-        ("上物三種",                    6000),
+        ("神戸ビーフセット",           21000),  # S1
+        ("神戸ビーフセット スペシャル", 41000),  # S2
+        ("特選三種",                    9000),  # S3
+        ("上物三種",                    6000),  # S4
     ],
     "🥬 野菜・ナムル": [
-        ("チシャ菜",     380),
-        ("キャベツ",     380),
-        ("サラダ",       600),
-        ("ナムル盛合せ", 600),
-        ("モヤシナムル", 380),
-        ("焼野菜",       600),
+        ("チシャ菜",     380),   # G1
+        ("キャベツ",     380),   # G2
+        ("サラダ",       600),   # G3
+        ("ナムル盛合せ", 600),   # G4
+        ("モヤシナムル", 380),   # G5
+        ("焼野菜",       600),   # G6
     ],
     "🥣 キムチ": [
-        ("キムチ盛合せ", 700),
-        ("白菜キムチ",   500),
-        ("大根キムチ",   500),
-        ("胡瓜キムチ",   500),
+        ("キムチ盛合せ", 700),   # F1
+        ("白菜キムチ",   500),   # F2
+        ("大根キムチ",   500),   # F3
+        ("胡瓜キムチ",   500),   # F4
     ],
     "🍚 ライス・スープ": [
-        ("ライス",       380),
-        ("ビビンバ",     800),
-        ("石焼ビビンバ", 950),
-        ("クッパ",       700),
-        ("ワカメスープ", 500),
-        ("玉子スープ",   500),
-        ("冷麺",         800),
+        ("ライス",       380),   # H1
+        ("ビビンバ",     800),   # H2
+        ("石焼ビビンバ", 950),   # H3
+        ("クッパ",       700),   # H4
+        ("ワカメスープ", 500),   # H5
+        ("玉子スープ",   500),   # H6
+        ("冷麺",         800),   # H7
     ],
     "🍺 ビール": [
-        ("生ビール 380ml",  600),
-        ("生ビール 大",     950),
+        ("生ビール 380ml",  600),              # J1
+        ("生ビール 大",     950), # J2 ※来店日で価格を動的切替
     ],
     "🍋 サワー・チューハイ": [
-        ("レモンサワー",          550),
-        ("ライムサワー",          550),
-        ("ピーチサワー",          550),
-        ("グレープフルーツサワー", 550),
-        ("カルピスサワー",         550),
+        ("レモンサワー",          550),  # K1
+        ("ライムサワー",          550),  # K2
+        ("ピーチサワー",          550),  # K3
+        ("グレープフルーツサワー", 550),  # K4
+        ("カルピスサワー",         550),  # K5
     ],
     "🥃 ハイボール": [
-        ("ブラックニッカクリア", 600),
-        ("ジャックダニエル",     700),
-        ("山崎ハイボール",      1400),
-        ("白州ハイボール",      1400),
-        ("知多ハイボール",      1000),
+        ("ブラックニッカクリア", 600),   # M1
+        ("ジャックダニエル",     700),   # M2
+        ("山崎ハイボール",      1400),   # M3
+        ("白州ハイボール",      1400),   # M4
+        ("知多ハイボール",      1000),   # M5
     ],
     "🍷 ワイン": [
-        ("グラス(赤)",              800),
-        ("カベルネ(赤)ハーフボトル", 2200),
+        ("グラス(赤)",              800),   # P1
+        ("カベルネ(赤)ハーフボトル", 2200), # P2
     ],
     "🌸 梅酒": [
-        ("梅酒(ロック/ソーダ/水割)", 600),
+        ("梅酒(ロック/ソーダ/水割)", 600),  # T1
     ],
     "🥃 焼酎": [
-        ("二階堂(麦)",          600),
-        ("佐藤(麦)",            900),
-        ("黒霧島(芋)",          600),
-        ("ジンロマッコリ 375ml", 1000),
+        ("二階堂(麦)",          600),   # L1
+        ("佐藤(麦)",            900),   # L2
+        ("黒霧島(芋)",          600),   # L3
+        ("ジンロマッコリ 375ml", 1000), # L4
     ],
     "🍶 日本酒": [
-        ("白鶴 一合 180ml",     600),
-        ("白鶴 二合 360ml",     800),
-        ("冷酒 300ml",          900),
-        ("長兵衛 大吟醸 120ml", 1300),
+        ("白鶴 一合 180ml",     600),   # N1
+        ("白鶴 二合 360ml",     800),   # N2
+        ("冷酒 300ml",          900),   # N3
+        ("長兵衛 大吟醸 120ml", 1300),  # N4
     ],
     "🥤 ソフトドリンク": [
-        ("ウーロン茶",      400),
-        ("オレンジジュース", 400),
-        ("カルピス",        400),
-        ("コーラ",          400),
-        ("ジンジャーエール", 400),
-        ("緑茶",            400),
+        ("ウーロン茶",      400),  # R1
+        ("オレンジジュース", 400), # R2
+        ("カルピス",        400),  # R3
+        ("コーラ",          400),  # R4
+        ("ジンジャーエール", 400), # R5
+        ("緑茶",            400),  # R6
     ],
 }
 
+# 全メニューフラットdict（OCRマッチング・手入力用）
 ALL_MENUS = {name: price for items in MENU_PRESETS.values() for name, price in items}
 
 # ============================================================
-# Googleスプレッドシート連携関数（列ズレ防止・完全一括上書き）
+# Googleスプレッドシート連携関数
 # ============================================================
 
 def get_gspread_client():
+    """サービスアカウントでgspreadクライアントを取得する"""
     if not GSPREAD_AVAILABLE:
         return None
     try:
+        # Streamlit Cloud: secretsからJSON取得
         if "gcp_service_account" in st.secrets:
             creds = Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"], scopes=GSPREAD_SCOPES
+                st.secrets["gcp_service_account"],
+                scopes=GSPREAD_SCOPES
             )
+        # PC: JSONファイルから取得
         elif os.path.exists(SERVICE_ACCOUNT_FILE):
             creds = Credentials.from_service_account_file(
-                SERVICE_ACCOUNT_FILE, scopes=GSPREAD_SCOPES
+                SERVICE_ACCOUNT_FILE,
+                scopes=GSPREAD_SCOPES
             )
         else:
             return None
@@ -215,8 +225,30 @@ def get_gspread_client():
     except Exception:
         return None
 
+
 def save_to_spreadsheet(df):
-    """常に定義されたCOLUMNS_ORDERの通りに並べ替えて全件上書きする"""
+    """DataFrameをGoogleスプレッドシートに全件上書き保存する"""
+    client = get_gspread_client()
+    if client is None:
+        st.error("❌ gspreadクライアントの取得に失敗しました")
+        return False
+    try:
+        sh = client.open_by_key(SPREADSHEET_ID)
+        try:
+            ws = sh.worksheet(SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=20)
+        ws.clear()
+        df_clean = df.fillna("").astype(str)
+        ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
+        return True
+    except Exception as e:
+        st.error(f"❌ スプレッドシート保存エラー: {e}")
+        return False
+
+
+def append_to_spreadsheet(new_rows_df):
+    """新しい行だけをGoogleスプレッドシートの末尾に追記する"""
     client = get_gspread_client()
     if client is None:
         return False
@@ -226,19 +258,19 @@ def save_to_spreadsheet(df):
             ws = sh.worksheet(SHEET_NAME)
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=20)
-        
-        ws.clear()
-        
-        for col in COLUMNS_ORDER:
-            if col not in df.columns:
-                df[col] = ""
-        df_ordered = df[COLUMNS_ORDER].fillna("").astype(str)
-        
-        ws.update([df_ordered.columns.tolist()] + df_ordered.values.tolist(), value_input_option='USER_ENTERED')
+        # シートが空の場合はヘッダーも追加
+        existing = ws.get_all_values()
+        if not existing:
+            df_clean = new_rows_df.fillna("").astype(str)
+            ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
+        else:
+            df_clean = new_rows_df.fillna("").astype(str)
+            ws.append_rows(df_clean.values.tolist())
         return True
     except Exception as e:
-        st.error(f"❌ スプレッドシート保存エラー: {e}")
+        st.error(f"❌ スプレッドシート追記エラー: {e}")
         return False
+
 
 # ============================================================
 # データ管理関数
@@ -248,35 +280,43 @@ def save_to_spreadsheet(df):
 def load_data():
     if os.path.exists(CSV_FILE):
         df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
-        for col in COLUMNS_ORDER:
-            if col not in df.columns:
-                if col == "顧客グループID":
-                    df[col] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
-                elif col == "テーブル番号":
-                    df[col] = ""
-                else:
-                    df[col] = ""
-        return df[COLUMNS_ORDER]
-    return pd.DataFrame(columns=COLUMNS_ORDER)
+        if "顧客グループID" not in df.columns:
+            df["顧客グループID"] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
+        if "テーブル番号" not in df.columns:
+            df["テーブル番号"] = ""
+        return df
+    return pd.DataFrame(columns=[
+        "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
+        "来店経路", "顧客グループID", "登録日時"
+    ])
+
 
 def save_data(df):
-    for col in COLUMNS_ORDER:
-        if col not in df.columns:
-            df[col] = ""
-    df = df[COLUMNS_ORDER]
-
     df.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
     try:
         with open(EXCEL_FILE, "wb") as f:
             f.write(generate_excel(df))
     except Exception as e:
         st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
-    
-    success = save_to_spreadsheet(df)
+    # Googleスプレッドシートにも保存
+    # Streamlit Cloud環境かどうかを判定（/mount/src/ で始まる場合はCloud）
+    is_cloud = (
+        BASE_DIR.startswith("/mount") or
+        BASE_DIR.startswith("/app") or
+        os.environ.get("STREAMLIT_SHARING_MODE") is not None or
+        "gcp_service_account" in st.secrets
+    )
+    if is_cloud:
+        # スマホ版（Streamlit Cloud）は追記
+        success = append_to_spreadsheet(df)
+    else:
+        # PC版は全件上書き
+        success = save_to_spreadsheet(df)
     if not success:
         st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました（CSVには保存済み）")
-    
+    # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
     load_data.clear()
+
 
 def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id):
     df = load_data()
@@ -298,9 +338,11 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
     ]
     save_data(pd.concat([df, pd.DataFrame(rows)], ignore_index=True))
 
+
 def delete_group(group_id):
     df = load_data()
     save_data(df[df["顧客グループID"] != group_id])
+
 
 # ============================================================
 # 分析関数
@@ -311,6 +353,7 @@ def calc_sales_by_nationality(df):
     if df.empty:
         return pd.DataFrame()
     return df.groupby("国籍")["金額"].sum().reset_index().rename(columns={"金額": "売上合計(円)"})
+
 
 @st.cache_data
 def calc_popular_menu_by_nationality(df, nationality):
@@ -324,6 +367,7 @@ def calc_popular_menu_by_nationality(df, nationality):
         売上合計=("金額", "sum")
     ).reset_index().sort_values("注文数", ascending=False)
 
+
 @st.cache_data
 def calc_avg_spend_per_person(df):
     if df.empty:
@@ -335,6 +379,11 @@ def calc_avg_spend_per_person(df):
     avg_spend = visit_summary.groupby("国籍")["客単価(円/人)"].mean().reset_index()
     avg_spend["客単価(円/人)"] = avg_spend["客単価(円/人)"].round(0).astype(int)
     return avg_spend.sort_values("客単価(円/人)", ascending=False)
+
+
+# ============================================================
+# Excelエクスポート関数
+# ============================================================
 
 def generate_excel(df):
     output = io.BytesIO()
@@ -348,19 +397,30 @@ def generate_excel(df):
             avg_df.to_excel(writer, sheet_name="平均客単価", index=False)
     return output.getvalue()
 
+
 # ============================================================
 # AI/OCR 伝票読み取り関数
 # ============================================================
 
 def ocr_receipt_with_gemini(image_bytes, api_key):
+    """
+    コード方式のOCR。
+    メニューコード表・国籍コード表をプロンプトに渡すため、
+    AIの仕事は「手書き文字を推測する」から「既知のコードから選ぶ」に変わる。
+    戻り値は辞書（visit_date / visit_time / table_num / num_people /
+    nationality_code / items / total / header_confidence）。
+    """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(GEMINI_MODEL)
     img = Image.open(io.BytesIO(image_bytes))
     response = model.generate_content([dx.build_ocr_prompt(), img])
     return dx.parse_ocr_response(response.text)
 
+
 def match_menu_to_presets(ocr_result):
+    """新形式（辞書）・旧形式（配列）どちらでも受け取れる。"""
     items = ocr_result.get("items", []) if isinstance(ocr_result, dict) else ocr_result
+
     matched, unmatched = [], []
     for item in items:
         code = item.get("code", "")
@@ -381,6 +441,7 @@ def match_menu_to_presets(ocr_result):
             })
     return matched, unmatched
 
+
 # ============================================================
 # セッション初期化
 # ============================================================
@@ -394,6 +455,7 @@ if "ocr_results" not in st.session_state:
 if "ocr_unmatched" not in st.session_state:
     st.session_state.ocr_unmatched = []
 
+# 精度ログ用：AIの生出力・画像名・所要時間を保持する
 for _k, _v in [("ocr_raw", []), ("ocr_image", ""), ("ocr_elapsed", None),
                ("ocr_header", {})]:
     if _k not in st.session_state:
@@ -403,13 +465,17 @@ for _k, _v in [("ocr_raw", []), ("ocr_image", ""), ("ocr_elapsed", None),
 # ページ設定
 # ============================================================
 
-st.set_page_config(page_title="焼肉 新恵 DXツール", page_icon="🥩", layout="wide")
+st.set_page_config(
+    page_title="焼肉 新恵 DXツール",
+    page_icon="🥩",
+    layout="wide"
+)
 
 st.title("🥩 道頓堀 焼肉 新恵｜DX注文管理ツール")
 st.caption("大学ゼミ研究用 | 外国人観光客向け注文データ分析システム")
 
 # ============================================================
-# サイドバー：注文入力
+# サイドバー：来店情報
 # ============================================================
 
 st.sidebar.header("📝 注文入力")
@@ -418,9 +484,14 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("来店情報")
 with st.sidebar.form("sidebar_form"):
     visit_date  = st.date_input("📅 来店日", value=date.today())
+    # 来店日が2026/6/1以前なら¥800、6/2以降なら¥950
     beer_large_price = 800 if visit_date <= date(2026, 6, 1) else 950
     table_num   = st.text_input("🪑 テーブル番号", placeholder="例：3、A-2")
-    nationality = st.selectbox("🌍 国籍", options=NATIONALITY_CODES, format_func=lambda c: nationality_display(c))
+    nationality = st.selectbox(
+        "🌍 国籍",
+        options=NATIONALITY_CODES,
+        format_func=lambda c: nationality_display(c),
+    )
     num_people  = st.number_input("👥 人数（名）", min_value=1, max_value=20, value=2, step=1)
     visit_route = st.selectbox("📍 来店経路", options=VISIT_ROUTES)
     st.form_submit_button("反映")
@@ -435,13 +506,26 @@ st.sidebar.subheader("🤖 AI/OCR 伝票読み取り")
 st.sidebar.caption("伝票を撮影してアップロード → AIが自動でカートに追加")
 
 if not GEMINI_AVAILABLE:
-    st.sidebar.warning("OCR機能を使うには以下をインストールしてください：\n```\npip install google-generativeai Pillow\n```")
+    st.sidebar.warning(
+        "OCR機能を使うには以下をインストールしてください：\n"
+        "```\npip install google-generativeai Pillow\n```"
+    )
 else:
-    gemini_api_key = st.sidebar.text_input("Gemini API Key", type="password", placeholder="AIza...")
-    uploaded_img = st.sidebar.file_uploader("伝票画像（JPG / PNG）", type=["jpg", "jpeg", "png"])
+    gemini_api_key = st.sidebar.text_input(
+        "Gemini API Key",
+        type="password",
+        placeholder="AIza...",
+        help="[Google AI Studio](https://aistudio.google.com) で無料取得できます",
+    )
+
+    uploaded_img = st.sidebar.file_uploader(
+        "伝票画像（JPG / PNG）",
+        type=["jpg", "jpeg", "png"],
+    )
 
     if uploaded_img and gemini_api_key:
         st.sidebar.image(uploaded_img, caption="アップロード画像", use_container_width=True)
+
         if st.sidebar.button("🔍 AIで伝票を読み取る", use_container_width=True, type="primary"):
             _t0 = time.time()
             with st.spinner("AI読み取り中..."):
@@ -451,24 +535,67 @@ else:
                     matched, unmatched = match_menu_to_presets(ocr_result)
                     st.session_state.ocr_results   = matched
                     st.session_state.ocr_unmatched = unmatched
-                    st.session_state.ocr_raw       = (ocr_result.get("items", []) if isinstance(ocr_result, dict) else ocr_result)
-                    st.session_state.ocr_header    = (ocr_result if isinstance(ocr_result, dict) else {})
+                    st.session_state.ocr_raw       = (
+                        ocr_result.get("items", []) if isinstance(ocr_result, dict) else ocr_result)
+                    st.session_state.ocr_header    = (
+                        ocr_result if isinstance(ocr_result, dict) else {})
                     st.session_state.ocr_image     = uploaded_img.name
                     st.session_state.ocr_elapsed   = time.time() - _t0
                     st.sidebar.success(f"✅ {len(matched)} 品目を読み取りました")
+                    if unmatched:
+                        st.sidebar.warning(f"⚠️ {len(unmatched)} 品目はメニューに見つかりませんでした")
+                except json.JSONDecodeError:
+                    st.sidebar.error("❌ AI応答のパースに失敗しました。もう一度お試しください。")
                 except Exception as e:
                     st.sidebar.error(f"❌ エラー: {e}")
 
     if st.session_state.ocr_results is not None:
         st.sidebar.markdown("---")
         st.sidebar.markdown("#### 📋 読み取り結果（確認）")
+
+        # コード表・金額との照合による警告
+        _warn_src = st.session_state.get("ocr_header") or st.session_state.get("ocr_raw", [])
+        for _w in dx.validate_ocr(_warn_src):
+            st.sidebar.warning(_w)
+
+        # AIが読み取った来店情報（サイドバー上部の入力欄と違えば知らせる）
+        _h = st.session_state.get("ocr_header", {})
+        if _h:
+            _bits = []
+            if _h.get("visit_date"):       _bits.append(f"日付 {_h['visit_date']}")
+            if _h.get("visit_time"):       _bits.append(f"時間 {_h['visit_time']}")
+            if _h.get("table_num"):        _bits.append(f"卓 {_h['table_num']}")
+            if _h.get("num_people"):       _bits.append(f"{_h['num_people']}名")
+            if _h.get("nationality_code"): _bits.append(f"国籍 {_h['nationality_code']}")
+            if _bits:
+                st.sidebar.info("AIが読んだ来店情報： " + " / ".join(_bits))
+
         confirmed_items = []
         for idx, item in enumerate(st.session_state.ocr_results):
             col_name, col_qty = st.sidebar.columns([3, 1])
             col_name.write(f"**{item['menu_name']}**  ¥{item['unit_price']:,}")
-            new_qty = col_qty.number_input("数量", min_value=0, max_value=99, value=item["quantity"], key=f"ocr_qty_{idx}", label_visibility="collapsed")
+            new_qty = col_qty.number_input(
+                "数量", min_value=0, max_value=99,
+                value=item["quantity"],
+                key=f"ocr_qty_{idx}",
+                label_visibility="collapsed",
+            )
             if new_qty > 0:
                 confirmed_items.append({**item, "quantity": new_qty})
+
+        if st.session_state.ocr_unmatched:
+            st.sidebar.markdown("**⚠️ 手動で対応メニューを選択してください**")
+            all_menu_labels = ["（スキップ）"] + [f"{n}　¥{p:,}" for n, p in ALL_MENUS.items()]
+            all_menu_list = list(ALL_MENUS.items())
+            for i, unk in enumerate(st.session_state.ocr_unmatched):
+                st.sidebar.caption(f"読み取り: 「{unk['menu_name']}」× {unk['quantity']}")
+                sel = st.sidebar.selectbox("対応メニュー", options=all_menu_labels, key=f"ocr_fallback_{i}")
+                if sel != "（スキップ）":
+                    sel_name, sel_price = all_menu_list[all_menu_labels.index(sel) - 1]
+                    confirmed_items.append({"menu_name": sel_name, "quantity": unk["quantity"], "unit_price": sel_price})
+
+        ocr_total = sum(i["unit_price"] * i["quantity"] for i in confirmed_items)
+        st.sidebar.markdown(f"**合計: ¥{ocr_total:,}**")
 
         oc1, oc2 = st.sidebar.columns(2)
         if oc1.button("🛒 カートに追加", key="ocr_add_to_cart", type="primary", use_container_width=True):
@@ -481,7 +608,9 @@ else:
                     st.session_state.cart.append(item)
             st.session_state.ocr_results   = None
             st.session_state.ocr_unmatched = []
+            st.sidebar.success("✅ カートに追加しました！")
             st.rerun()
+
         if oc2.button("✕ キャンセル", key="ocr_cancel", use_container_width=True):
             st.session_state.ocr_results   = None
             st.session_state.ocr_unmatched = []
@@ -494,11 +623,24 @@ st.sidebar.markdown("---")
 # ============================================================
 
 st.sidebar.subheader("🍖 メニュー選択")
+st.sidebar.caption("ボタンを押すと即カートに追加。同じメニューを押すと数量+1")
+
+# 生ビール大の価格告知（来店日連動）
+if beer_large_price == 800:
+    st.sidebar.info("🍺 生ビール 大：¥800（来店日が2026/6/1以前）")
+else:
+    st.sidebar.info("🍺 生ビール 大：¥950（来店日が2026/6/2以降）")
+
 for category, items in MENU_PRESETS.items():
     with st.sidebar.expander(category, expanded=False):
         for name, price in items:
+            # 生ビール大は来店日で価格を動的切替
             actual_price = beer_large_price if name == "生ビール 大" else price
-            if st.button(f"{name} ¥{actual_price:,}", key=f"btn_{name}", use_container_width=True):
+            if st.button(
+                f"{name}　¥{actual_price:,}",
+                key=f"btn_{name}",
+                use_container_width=True
+            ):
                 for item in st.session_state.cart:
                     if item["menu_name"] == name:
                         item["quantity"] += 1
@@ -507,6 +649,25 @@ for category, items in MENU_PRESETS.items():
                     st.session_state.cart.append({"menu_name": name, "quantity": 1, "unit_price": actual_price})
                 st.rerun()
 
+# 手入力でメニュー追加
+with st.sidebar.expander("✍️ 手入力でメニュー追加", expanded=False):
+    manual_name = st.text_input("メニュー名", key="manual_menu_name")
+    mc1, mc2 = st.columns(2)
+    manual_qty   = mc1.number_input("数量", min_value=1, max_value=99, value=1, key="manual_menu_qty")
+    manual_price = mc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key="manual_menu_price")
+    if st.button("🛒 カートに追加", key="manual_add_to_cart", use_container_width=True):
+        if manual_name.strip():
+            for item in st.session_state.cart:
+                if item["menu_name"] == manual_name.strip():
+                    item["quantity"] += manual_qty
+                    break
+            else:
+                st.session_state.cart.append({"menu_name": manual_name.strip(), "quantity": manual_qty, "unit_price": manual_price})
+            st.success(f"✅ {manual_name} を追加しました")
+            st.rerun()
+        else:
+            st.warning("メニュー名を入力してください")
+
 st.sidebar.markdown("---")
 
 # ============================================================
@@ -514,14 +675,70 @@ st.sidebar.markdown("---")
 # ============================================================
 
 st.sidebar.subheader("🧾 カート")
-if st.session_state.cart:
-    total = sum(i["quantity"] * i["unit_price"] for i in st.session_state.cart)
+
+if not st.session_state.cart:
+    st.sidebar.caption("カートは空です")
+else:
+    total = 0
+    for idx, item in enumerate(st.session_state.cart):
+        subtotal = item["quantity"] * item["unit_price"]
+        total += subtotal
+
+        col_name, col_minus, col_num, col_plus, col_del = st.sidebar.columns([4, 1, 1, 1, 1])
+        col_name.write(f"**{item['menu_name']}**")
+
+        if col_minus.button("－", key=f"minus_{idx}"):
+            if st.session_state.cart[idx]["quantity"] > 1:
+                st.session_state.cart[idx]["quantity"] -= 1
+            st.rerun()
+
+        col_num.write(f"**{item['quantity']}**")
+
+        if col_plus.button("＋", key=f"plus_{idx}"):
+            st.session_state.cart[idx]["quantity"] += 1
+            st.rerun()
+
+        if col_del.button("🗑", key=f"del_{idx}"):
+            st.session_state.cart.pop(idx)
+            st.rerun()
+
+        st.sidebar.caption(f"　¥{item['unit_price']:,} × {item['quantity']} = ¥{subtotal:,}")
+
+    st.sidebar.markdown(f"### 合計: ¥{total:,}")
+    st.sidebar.markdown("---")
+
     if st.sidebar.button("💾 このグループを保存", type="primary", use_container_width=True):
         group_id   = str(uuid.uuid4())[:8]
         menu_items = [(i["menu_name"], i["quantity"], i["quantity"] * i["unit_price"]) for i in st.session_state.cart]
         add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id)
+
+        # 【最重要】AIの出力と人の修正結果を両方記録する。
+        # この差分が読み取り精度そのものであり、12月の比較根拠になる。
+        if st.session_state.get("ocr_raw"):
+            dx.log_reading(
+                group_id    = group_id,
+                image_name  = st.session_state.get("ocr_image", ""),
+                ai_items    = st.session_state.get("ocr_raw", []),
+                final_items = [{"menu_name": i["menu_name"], "quantity": i["quantity"]}
+                               for i in st.session_state.cart],
+                elapsed_sec = st.session_state.get("ocr_elapsed"),
+            )
+        # 来店時間（1〜6月の伝票には無いため、7月以降のみ蓄積される）
+        _vt = (st.session_state.get("ocr_header") or {}).get("visit_time")
+        if _vt:
+            dx.log_visit_time(group_id, visit_date, _vt, table_num,
+                              nationality, num_people)
+
+        st.session_state.ocr_raw     = []
+        st.session_state.ocr_header  = {}
+        st.session_state.ocr_image   = ""
+        st.session_state.ocr_elapsed = None
         st.session_state.cart = []
         st.sidebar.success(f"✅ 保存しました！（ID: {group_id}）")
+        st.rerun()
+
+    if st.sidebar.button("🗑 カートをリセット", use_container_width=True):
+        st.session_state.cart = []
         st.rerun()
 
 # ============================================================
@@ -529,6 +746,7 @@ if st.session_state.cart:
 # ============================================================
 
 df = load_data()
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 データ一覧",
     "👥 顧客グループ管理",
@@ -600,10 +818,10 @@ with tab2:
 
         for _, row in group_summary.iterrows():
             gid = row["顧客グループID"]
-            tbl = f"🪑{row['テーブル番号']} " if str(row.get("テーブル番号", "")).strip() else ""
+            tbl = f"🪑{row['テーブル番号']}　" if str(row.get("テーブル番号", "")).strip() else ""
             with st.expander(
-                f"📅 {row['日付']} {tbl}🌍 {row['国籍']} 👥 {row['人数']}名 "
-                f"💴 ¥{int(row['合計金額']):,} [ID: {gid}]"
+                f"📅 {row['日付']}　{tbl}🌍 {row['国籍']}　👥 {row['人数']}名　"
+                f"💴 ¥{int(row['合計金額']):,}　[ID: {gid}]"
             ):
                 gdf = df[df["顧客グループID"] == gid].copy()
 
@@ -630,7 +848,7 @@ with tab2:
                         for i, orig_idx in enumerate(orig_indices):
                             r = gdf.loc[orig_idx]
                             mc1, mc2, mc3 = st.columns([4, 2, 1])
-                            mc1.write(f"**{r['メニュー名']}** ¥{int(r['金額']) // int(r['数量']):,}/個")
+                            mc1.write(f"**{r['メニュー名']}**　¥{int(r['金額']) // int(r['数量']):,}/個")
                             new_q = mc2.number_input("数量", min_value=0, max_value=99,
                                         value=int(r["数量"]), key=f"eq_{gid}_{i}",
                                         label_visibility="collapsed")
@@ -641,7 +859,7 @@ with tab2:
 
                         st.markdown("**メニューを追加する（プリセット）**")
                         all_menus   = [(name, price) for items in MENU_PRESETS.values() for name, price in items]
-                        menu_labels = [f"{n} ¥{p:,}" for n, p in all_menus]
+                        menu_labels = [f"{n}　¥{p:,}" for n, p in all_menus]
                         add_sel = st.selectbox("追加メニュー", ["（追加しない）"] + menu_labels, key=f"eadd_{gid}")
                         add_qty = st.number_input("追加数量", min_value=1, max_value=99, value=1, key=f"eaddq_{gid}")
 
@@ -690,8 +908,8 @@ with tab2:
                     show_df = gdf[["メニュー名", "数量", "金額"]].copy()
                     show_df["金額"] = show_df["金額"].apply(lambda x: f"¥{x:,}")
                     st.dataframe(show_df.reset_index(drop=True), use_container_width=True)
-                    tbl_disp = f"テーブル: {row['テーブル番号']} ｜ " if str(row.get("テーブル番号", "")).strip() else ""
-                    st.caption(f"{tbl_disp}来店経路: {row['来店経路']} ｜ 登録日時: {row['登録日時']}")
+                    tbl_disp = f"テーブル: {row['テーブル番号']}　｜　" if str(row.get("テーブル番号", "")).strip() else ""
+                    st.caption(f"{tbl_disp}来店経路: {row['来店経路']}　｜　登録日時: {row['登録日時']}")
 
                     bc1, bc2 = st.columns(2)
                     if bc1.button("✏️ 編集", key=f"edit_group_{gid}"):
@@ -784,7 +1002,15 @@ with tab5:
                 d["客単価(円/人)"] = d["客単価(円/人)"].apply(lambda x: f"¥{x:,}")
                 st.dataframe(d, use_container_width=True)
 
-# タブ6：一括読み取り
+# フッター
+st.markdown("---")
+st.caption("🎓 大学ゼミ研究用プロトタイプ ｜ データは yakiniku_orders.csv に保存されます")
+
+
+# ============================================================
+# タブ6：一括読み取り（AI優先・PC用）
+# 手入力を極力使わず、複数の伝票をまとめて処理する
+# ============================================================
 with tab6:
     dx.render_batch_tab(
         st, pd, add_order, ALL_MENUS, NATIONALITY_CODES,
@@ -792,17 +1018,88 @@ with tab6:
         uuid, date, time,
     )
 
+
+# ============================================================
 # タブ7：読み取り精度
+# AIの出力と人の修正結果の差分から、精度を自動集計する
+# ============================================================
 with tab7:
     st.subheader("🎯 OCR読み取り精度")
+
     summary = dx.accuracy_summary()
     if summary is None:
         st.info("まだ記録がありません。伝票を読み取って登録すると集計されます。")
     else:
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("品目単位精度", f"{summary['品目単位精度']:.1%}")
+        c1.metric(
+            "品目単位精度",
+            f"{summary['品目単位精度']:.1%}",
+            delta=f"{(summary['品目単位精度'] - summary['旧方式の理論値']) * 100:+.1f}pt",
+            help="旧方式（金額から逆引き）の理論値との差",
+        )
         c2.metric("伝票単位精度", f"{summary['伝票単位精度']:.1%}")
         c3.metric("読み取り品目数", f"{summary['品目数']:,}")
         c4.metric("伝票枚数", f"{summary['伝票枚数']:,}")
+
+        st.caption(
+            f"旧方式（金額から品目を逆引き）の理論上の正答率は "
+            f"**{summary['旧方式の理論値']:.1%}** です。"
+            "同額の品目が多いため、原理的にそれ以上は上がりません。"
+        )
+
+        st.markdown("#### よく間違えるコード")
+        conf = dx.confusion_table()
+        if len(conf):
+            st.dataframe(conf, use_container_width=True, hide_index=True)
+            st.caption(
+                "特定のペアに偏っていれば、その2つを見分ける指示を "
+                "dx_addon.py のプロンプトに追加できます。"
+            )
+        else:
+            st.success("修正が発生していません。")
+
+        st.markdown("#### 所要時間")
+        _log = dx.load_accuracy_log()
+        _sec = pd.to_numeric(_log["所要秒数"], errors="coerce").dropna()
+        if len(_sec):
+            st.metric("1枚あたり平均", f"{_sec.mean():.1f} 秒")
+            st.caption("⚠️ 30秒を超えると、店舗での運用は現実的ではありません。")
+
+        st.markdown("#### 金額で判別できない品目")
+        st.caption("コード体系を導入した理由。旧方式ではこれらを区別できませんでした。")
+        _rows = [
+            {"価格": f"¥{p:,}", "品数": len(cs), "コード": " ".join(cs)}
+            for p, cs in sorted(dx.same_price_groups().items(), reverse=True)
+        ]
+        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+
         with open(dx.ACCURACY_LOG, "rb") as _f:
-            st.download_button("精度ログCSVをダウンロード", _f, file_name="ocr_accuracy_log.csv", mime="text/csv")
+            st.download_button(
+                "精度ログCSVをダウンロード", _f,
+                file_name="ocr_accuracy_log.csv", mime="text/csv",
+            )
+
+    # ------------------------------------------------------------
+    # 来店時間の分析（7月以降の伝票のみ。1〜6月には時間の記載が無い）
+    # 教員コメント「曜日や時間帯への言及が不足」への回答データ
+    # ------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("#### 🕐 来店時間帯の分析")
+    _vt = dx.load_visit_times()
+    if _vt.empty:
+        st.info("来店時間の記録がまだありません。（1〜6月の伝票には時間の記載がありません）")
+    else:
+        _order = ["〜14時台", "15-16時台", "17-18時台", "19-20時台", "21時以降"]
+        _cnt = _vt["時間帯"].value_counts().reindex(_order).fillna(0).astype(int)
+        st.bar_chart(_cnt)
+
+        st.markdown("##### 時間帯 × 国籍区分")
+        _pivot = pd.crosstab(_vt["時間帯"], _vt["国籍区分"]).reindex(_order).fillna(0).astype(int)
+        st.dataframe(_pivot, use_container_width=True)
+
+        st.markdown("##### 曜日 × 時間帯")
+        _wd = ["月", "火", "水", "木", "金", "土", "日"]
+        _pivot2 = pd.crosstab(_vt["曜日"], _vt["時間帯"])
+        _pivot2 = _pivot2.reindex(index=[d for d in _wd if d in _pivot2.index])
+        _pivot2 = _pivot2.reindex(columns=[c for c in _order if c in _pivot2.columns])
+        st.dataframe(_pivot2, use_container_width=True)
