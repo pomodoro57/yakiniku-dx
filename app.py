@@ -299,12 +299,17 @@ def save_data(df):
     except Exception as e:
         st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
     # Googleスプレッドシートにも保存
-    # PC版（CSVあり）は全件上書き、スマホ版（CSVなし）は追記
-    if os.path.exists(CSV_FILE):
-        success = save_to_spreadsheet(df)
-    else:
-        # 追記する行（最後に追加された行のみ）
+    # Streamlit Cloud環境かどうかを判定
+    is_cloud = os.environ.get("STREAMLIT_SHARING_MODE") or \
+               os.environ.get("STCLOUD") or \
+               not os.path.isabs(BASE_DIR) or \
+               BASE_DIR.startswith("/mount")
+    if is_cloud:
+        # スマホ版（Streamlit Cloud）は追記
         success = append_to_spreadsheet(df)
+    else:
+        # PC版は全件上書き
+        success = save_to_spreadsheet(df)
     if not success:
         st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました（CSVには保存済み）")
     # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
