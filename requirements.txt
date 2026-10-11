@@ -4,3 +4,5 @@ pandas
 openpyxl
 google-generativeai
 Pillow
+gspread
+google-auth
