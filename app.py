@@ -227,7 +227,7 @@ def get_gspread_client():
 
 
 def save_to_spreadsheet(df):
-    """DataFrameをGoogleスプレッドシートに全件書き込む"""
+    """DataFrameをGoogleスプレッドシートに全件上書き保存する"""
     client = get_gspread_client()
     if client is None:
         st.error("❌ gspreadクライアントの取得に失敗しました")
@@ -244,6 +244,31 @@ def save_to_spreadsheet(df):
         return True
     except Exception as e:
         st.error(f"❌ スプレッドシート保存エラー: {e}")
+        return False
+
+
+def append_to_spreadsheet(new_rows_df):
+    """新しい行だけをGoogleスプレッドシートの末尾に追記する"""
+    client = get_gspread_client()
+    if client is None:
+        return False
+    try:
+        sh = client.open_by_key(SPREADSHEET_ID)
+        try:
+            ws = sh.worksheet(SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=20)
+        # シートが空の場合はヘッダーも追加
+        existing = ws.get_all_values()
+        if not existing:
+            df_clean = new_rows_df.fillna("").astype(str)
+            ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
+        else:
+            df_clean = new_rows_df.fillna("").astype(str)
+            ws.append_rows(df_clean.values.tolist())
+        return True
+    except Exception as e:
+        st.error(f"❌ スプレッドシート追記エラー: {e}")
         return False
 
 
@@ -274,7 +299,13 @@ def save_data(df):
     except Exception as e:
         st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
     # Googleスプレッドシートにも保存
-    if not save_to_spreadsheet(df):
+    # PC版（CSVあり）は全件上書き、スマホ版（CSVなし）は追記
+    if os.path.exists(CSV_FILE):
+        success = save_to_spreadsheet(df)
+    else:
+        # 追記する行（最後に追加された行のみ）
+        success = append_to_spreadsheet(df)
+    if not success:
         st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました（CSVには保存済み）")
     # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
     load_data.clear()
