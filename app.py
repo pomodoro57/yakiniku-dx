@@ -296,6 +296,10 @@ def load_data():
                 data = ws.get_all_values()
                 if len(data) > 1:
                     df = pd.DataFrame(data[1:], columns=data[0])
+                    # 数値列を変換
+                    for col in ["人数", "数量", "金額"]:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
                     return df
             except Exception:
                 pass
