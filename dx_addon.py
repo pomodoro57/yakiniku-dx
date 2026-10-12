@@ -13,6 +13,7 @@ app.py と同じフォルダに置いてください。
 
 import csv
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -40,10 +41,12 @@ MENU_CODES = {
     "S2": ("神戸ビーフセット スペシャル", 41000),
     "S3": ("特選三種", 9000),
     "S4": ("上物三種", 6000),
+    "S5": ("ポークセット", 5000),
     # 野菜・ナムル
     "G1": ("チシャ菜", 380), "G2": ("キャベツ", 380),
     "G3": ("サラダ", 600), "G4": ("ナムル盛合せ", 600),
     "G5": ("モヤシナムル", 380), "G6": ("焼野菜", 600),
+    "G7": ("ネギ", 100),
     # キムチ
     "F1": ("キムチ盛合せ", 700), "F2": ("白菜キムチ", 500),
     "F3": ("大根キムチ", 500), "F4": ("胡瓜キムチ", 500),
@@ -52,9 +55,11 @@ MENU_CODES = {
     "H3": ("石焼ビビンバ", 950), "H4": ("クッパ", 700),
     "H5": ("ワカメスープ", 500), "H6": ("玉子スープ", 500),
     "H7": ("冷麺", 800),
+    "H8": ("ライス大", 480), "H9": ("ライス小", 280),
     # ビール
     "J1": ("生ビール 380ml", 600),
     "J2": ("生ビール 大", 950),  # ※来店日で800/950が切り替わる
+    "J3": ("生ビール 小", 500),
     # サワー・チューハイ
     "K1": ("レモンサワー", 550), "K2": ("ライムサワー", 550),
     "K3": ("ピーチサワー", 550), "K4": ("グレープフルーツサワー", 550),
@@ -538,6 +543,11 @@ def confusion_table(top_n=15):
 #    という流れで大量の伝票を処理する。
 # ============================================================
 
+# 仮登録で有効な明細が1つも無いときに入れる目印の行（行が0だとグループ自体が保存されないため）。
+# 数量1・金額0。tab2の編集でこの行を削除し、正しいメニューを追加して本登録にする。
+PROVISIONAL_PLACEHOLDER_ITEM = ("（読取不可・要修正）", 1, 0)
+
+
 def render_batch_tab(st, pd, add_order, all_menus, nationalities,
                      visit_routes, ocr_func, uuid_mod, date_mod, time_mod):
     """
@@ -581,10 +591,17 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
     total = len(files)
 
     if idx >= total:
-        st.success(f"✅ {total}枚すべて登録しました。")
+        done = st.session_state.batch_done
+        n_prov = sum(1 for _, kind in done if kind == "仮登録")
+        n_reg = len(done) - n_prov
+        st.success(f"✅ 処理が完了しました（本登録 {n_reg}枚・仮登録 {n_prov}枚）。")
+        if n_prov:
+            st.info("🚩 仮登録したものは「顧客グループ管理」で確認・修正できます：\n\n"
+                    + "\n".join(f"- {name}" for name, kind in done if kind == "仮登録"))
         if st.button("最初からやり直す"):
             st.session_state.batch_idx = 0
             st.session_state.batch_ocr = {}
+            st.session_state.batch_done = []
             st.rerun()
         return
 
@@ -604,7 +621,24 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
                 raw = ocr_func(current.getvalue(), api_key)
             except Exception as e:
                 st.error(f"読み取り失敗: {e}")
-                if st.button("この1枚を飛ばす", key=f"skip_{idx}"):
+                memo_text = st.text_input(
+                    "メモ（任意・仮登録時に記録）", key=f"memo_{idx}",
+                    placeholder="例：画像が不鮮明／読み取りエラー など")
+                if st.button("🚩 仮登録（後で直す）", key=f"prov_fail_{idx}"):
+                    # コードが読めていないので明細は目印の1行だけ。
+                    # 来店情報は前の伝票の値を仮に入れておき、後でtab2で直す。
+                    add_order(
+                        st.session_state.get("batch_last_date", date_mod.today()),
+                        "", "O",
+                        st.session_state.get("batch_last_people", 2),
+                        [PROVISIONAL_PLACEHOLDER_ITEM],
+                        st.session_state.get("batch_last_route", visit_routes[0]),
+                        str(uuid_mod.uuid4())[:8],
+                        image_name=os.path.splitext(current.name)[0],
+                        provisional=True,
+                        memo=memo_text or f"読み取り失敗: {e}",
+                    )
+                    st.session_state.batch_done.append((current.name, "仮登録"))
                     st.session_state.batch_idx += 1
                     st.rerun()
                 return
@@ -720,6 +754,13 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
         if st.session_state.get("batch_last_route") in visit_routes else 0,
         key=f"br_{idx}")
 
+    discount_10 = st.checkbox("🏷️ 10%オフ伝票", key=f"disc_{idx}",
+                              help="伝票に「10%off」と書かれている場合にチェック")
+
+    memo_text = st.text_input("メモ（任意・仮登録時に記録）",
+                              key=f"memo_{idx}",
+                              placeholder="例：数量が不明瞭／品目が読めない など")
+
     b1, b2 = st.columns([3, 1])
 
     if b1.button("✅ 登録して次へ", type="primary", use_container_width=True,
@@ -735,8 +776,11 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
              (all_menus.get(name_of(r["コード"]), price_of(r["コード"])) or 0) * int(r["数量"]))
             for _, r in valid.iterrows()
         ]
+        # 画像ファイル名（拡張子なし）を注文データに残す。例: 20260825-1.jpg → 20260825-1
+        image_name = os.path.splitext(current.name)[0]
         add_order(visit_date, table_num, nationality, num_people,
-                  menu_items, visit_route, group_id)
+                  menu_items, visit_route, group_id,
+                  image_name=image_name, discount_10=discount_10)
 
         # 来店時間を別ファイルに記録（既存CSVの列を壊さないため）
         if visit_time:
@@ -756,9 +800,25 @@ def render_batch_tab(st, pd, add_order, all_menus, nationalities,
         st.session_state.batch_last_date = visit_date
         st.session_state.batch_last_people = num_people
         st.session_state.batch_last_route = visit_route
+        st.session_state.batch_done.append((current.name, "登録"))
         st.session_state.batch_idx += 1
         st.rerun()
 
-    if b2.button("⏭ 飛ばす", use_container_width=True, key=f"skp_{idx}"):
+    if b2.button("🚩 仮登録（後で直す）", use_container_width=True, key=f"prov_{idx}"):
+        # AIが読み取った内容をそのまま仮登録として保存する（案A）。
+        # 間違っていてもよい。後でtab2で修正する。集計には含めない。
+        # 精度ログ・来店時間ログは内容が未確定なので記録しない。
+        menu_items = [
+            (name_of(r["コード"]),
+             int(r["数量"]),
+             (all_menus.get(name_of(r["コード"]), price_of(r["コード"])) or 0) * int(r["数量"]))
+            for _, r in valid.iterrows()
+        ] or [PROVISIONAL_PLACEHOLDER_ITEM]
+        add_order(visit_date, table_num, nationality, num_people,
+                  menu_items, visit_route, str(uuid_mod.uuid4())[:8],
+                  image_name=os.path.splitext(current.name)[0],
+                  discount_10=discount_10,
+                  provisional=True, memo=memo_text)
+        st.session_state.batch_done.append((current.name, "仮登録"))
         st.session_state.batch_idx += 1
         st.rerun()

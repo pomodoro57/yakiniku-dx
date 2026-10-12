@@ -4,6 +4,7 @@
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import os
 import uuid
@@ -40,16 +41,19 @@ CSV_FILE   = os.path.join(BASE_DIR, "yakiniku_orders.csv")
 EXCEL_FILE = os.path.join(BASE_DIR, "yakiniku_orders.xlsx")
 
 # Googleスプレッドシート設定
-SPREADSHEET_ID  = "1FQJT7zJE3-sQOdchxcrohmI6BXUZ-rcyzuIUWAVzYFU"
-SHEET_NAME      = "注文データ"
+SPREADSHEET_ID       = "1FQJT7zJE3-sQOdchxcrohmI6BXUZ-rcyzuIUWAVzYFU"
+SHEET_NAME           = "注文データ"
 SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service_account.json")
-GSPREAD_SCOPES  = [
+GSPREAD_SCOPES       = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
 # Gemini モデル名（モデル更新時はここだけ変更すればよい）
 GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+# tab2（顧客グループ管理）で1ページに描画するグループ数（変更時はここだけ変更すればよい）
+TAB2_PAGE_SIZE = 20
 
 # 国籍6区分コード（中間報告No.04 成果物B と統一。dx_addon.py の NATIONALITY_GROUPS と同一）
 # 保存する値はコード1文字。伝票の国籍コード・AI読み取り・分析レポートとすべて一致させる。
@@ -124,6 +128,7 @@ MENU_PRESETS = {
         ("神戸ビーフセット スペシャル", 41000),  # S2
         ("特選三種",                    9000),  # S3
         ("上物三種",                    6000),  # S4
+        ("ポークセット",                5000),  # S5
     ],
     "🥬 野菜・ナムル": [
         ("チシャ菜",     380),   # G1
@@ -132,6 +137,7 @@ MENU_PRESETS = {
         ("ナムル盛合せ", 600),   # G4
         ("モヤシナムル", 380),   # G5
         ("焼野菜",       600),   # G6
+        ("ネギ",         100),   # G7
     ],
     "🥣 キムチ": [
         ("キムチ盛合せ", 700),   # F1
@@ -147,10 +153,13 @@ MENU_PRESETS = {
         ("ワカメスープ", 500),   # H5
         ("玉子スープ",   500),   # H6
         ("冷麺",         800),   # H7
+        ("ライス大",     480),   # H8
+        ("ライス小",     280),   # H9
     ],
     "🍺 ビール": [
         ("生ビール 380ml",  600),              # J1
         ("生ビール 大",     950), # J2 ※来店日で価格を動的切替
+        ("生ビール 小",     500),              # J3
     ],
     "🍋 サワー・チューハイ": [
         ("レモンサワー",          550),  # K1
@@ -199,26 +208,23 @@ MENU_PRESETS = {
 ALL_MENUS = {name: price for items in MENU_PRESETS.values() for name, price in items}
 
 # ============================================================
+# データ管理関数
+# ============================================================
+
+# ============================================================
 # Googleスプレッドシート連携関数
 # ============================================================
 
 def get_gspread_client():
-    """サービスアカウントでgspreadクライアントを取得する"""
     if not GSPREAD_AVAILABLE:
         return None
     try:
-        # Streamlit Cloud: secretsからJSON取得
         if "gcp_service_account" in st.secrets:
             creds = Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"],
-                scopes=GSPREAD_SCOPES
-            )
-        # PC: JSONファイルから取得
+                st.secrets["gcp_service_account"], scopes=GSPREAD_SCOPES)
         elif os.path.exists(SERVICE_ACCOUNT_FILE):
             creds = Credentials.from_service_account_file(
-                SERVICE_ACCOUNT_FILE,
-                scopes=GSPREAD_SCOPES
-            )
+                SERVICE_ACCOUNT_FILE, scopes=GSPREAD_SCOPES)
         else:
             return None
         return gspread.authorize(creds)
@@ -227,17 +233,15 @@ def get_gspread_client():
 
 
 def save_to_spreadsheet(df):
-    """DataFrameをGoogleスプレッドシートに全件上書き保存する"""
     client = get_gspread_client()
     if client is None:
-        st.error("❌ gspreadクライアントの取得に失敗しました")
         return False
     try:
         sh = client.open_by_key(SPREADSHEET_ID)
         try:
             ws = sh.worksheet(SHEET_NAME)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=20)
+            ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=25)
         ws.clear()
         df_clean = df.fillna("").astype(str)
         ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
@@ -247,44 +251,25 @@ def save_to_spreadsheet(df):
         return False
 
 
-def append_to_spreadsheet(new_rows_df):
-    """新しい行だけをGoogleスプレッドシートの末尾に追記する"""
-    client = get_gspread_client()
-    if client is None:
-        return False
-    try:
-        sh = client.open_by_key(SPREADSHEET_ID)
-        try:
-            ws = sh.worksheet(SHEET_NAME)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=20)
-        # シートが空の場合はヘッダーも追加
-        existing = ws.get_all_values()
-        if not existing:
-            df_clean = new_rows_df.fillna("").astype(str)
-            ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
-        else:
-            df_clean = new_rows_df.fillna("").astype(str)
-            ws.append_rows(df_clean.values.tolist())
-        return True
-    except Exception as e:
-        st.error(f"❌ スプレッドシート追記エラー: {e}")
-        return False
-
-
-# ============================================================
-# データ管理関数
 # ============================================================
 
 @st.cache_data
 def load_data():
-    # PC版：CSVから読み込む
     if os.path.exists(CSV_FILE):
         df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
         if "顧客グループID" not in df.columns:
             df["顧客グループID"] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
         if "テーブル番号" not in df.columns:
             df["テーブル番号"] = ""
+        if "画像名" not in df.columns:
+            df["画像名"] = ""          # 既存行は空
+        if "割引10%" not in df.columns:
+            df["割引10%"] = False       # 既存行は割引なし扱い
+        if "仮登録" not in df.columns:
+            df["仮登録"] = False        # 既存行は本登録扱い
+        if "メモ" not in df.columns:
+            df["メモ"] = ""             # 既存行はメモ空
+        df["メモ"] = df["メモ"].fillna("")  # CSV再読込で空欄が NaN になる対策
         return df
     # スマホ版（Streamlit Cloud）：スプレッドシートから読み込む
     client = get_gspread_client()
@@ -296,10 +281,16 @@ def load_data():
                 data = ws.get_all_values()
                 if len(data) > 1:
                     df = pd.DataFrame(data[1:], columns=data[0])
-                    # 数値列を変換
                     for col in ["人数", "数量", "金額"]:
                         if col in df.columns:
                             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+                    for col in ["割引10%", "仮登録"]:
+                        if col in df.columns:
+                            df[col] = df[col].map({"True": True, "False": False}).fillna(False)
+                    for col in ["画像名", "メモ"]:
+                        if col not in df.columns:
+                            df[col] = ""
+                    df["メモ"] = df["メモ"].fillna("")
                     return df
             except Exception:
                 pass
@@ -307,25 +298,29 @@ def load_data():
             pass
     return pd.DataFrame(columns=[
         "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
-        "来店経路", "顧客グループID", "登録日時"
+        "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%",
+        "仮登録", "メモ"
     ])
 
 
 def save_data(df):
-    df.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
-    try:
-        with open(EXCEL_FILE, "wb") as f:
-            f.write(generate_excel(df))
-    except Exception as e:
-        st.warning(f"⚠️ Excelファイルへの同期保存に失敗しました: {e}")
-    # GoogleスプレッドシートにPC・スマホともに全件上書き
+    # CSVのみ即保存する（軽い）。Excelは保存のたびに作らず、
+    # タブ1の「Excelを生成」ボタンを押したときだけ generate_excel で生成する。
+    # （Excel再生成が保存のたびに走ると「登録して次へ」が待たされるため）
+    if os.path.exists(BASE_DIR) and os.access(BASE_DIR, os.W_OK):
+        try:
+            df.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
+        except Exception:
+            pass
+    # Googleスプレッドシートに全件上書き保存
     if not save_to_spreadsheet(df):
-        st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました（CSVには保存済み）")
+        st.warning("⚠️ Googleスプレッドシートへの保存に失敗しました")
     # データを保存したらキャッシュを破棄し、次回 load_data() で最新を読み直す
     load_data.clear()
 
 
-def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id):
+def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
+              image_name="", discount_10=False, provisional=False, memo=""):
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = [
@@ -340,6 +335,10 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
             "来店経路":       visit_route,
             "顧客グループID": group_id,
             "登録日時":       now_str,
+            "画像名":         image_name,
+            "割引10%":        discount_10,
+            "仮登録":         provisional,
+            "メモ":           memo,
         }
         for menu_name, quantity, price in menu_items
     ]
@@ -352,6 +351,79 @@ def delete_group(group_id):
 
 
 # ============================================================
+# 割引（10%オフ）計算関数
+# ============================================================
+# 方式A：保存する「金額」は定価のまま。割引は表示・集計のときだけ計算する。
+# こうしておくと、あとから定価ベースの売上と割引後の実売上を両方出せる。
+
+def is_discounted(value):
+    """割引10%列の値を bool に正規化（CSV再読込で "True"/"False" 文字列になる対策）。"""
+    return str(value).strip().lower() in ("true", "1", "1.0", "yes")
+
+
+def fmt_table(v):
+    """テーブル番号を表示用の文字列にする（CSV再読込で 2.0 / NaN になる対策。保存値は変えない）。"""
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        if pd.isna(v):
+            return ""
+        if v.is_integer():
+            return str(int(v))
+    s = str(v).strip()
+    if s.lower() == "nan":
+        return ""
+    # 文字列で "2.0" と保存されている場合（列に文字と数字が混ざったとき）も "2" にする
+    if s.endswith(".0") and s[:-2].isdigit():
+        return s[:-2]
+    return s
+
+
+# ============================================================
+# 仮登録（一括読み取りで「後で直す」にした伝票）
+# ============================================================
+# 仮登録は未確定なので集計・分析には含めない。一覧（tab1・tab2）には表示する。
+
+def is_provisional(value):
+    """仮登録列の値を bool に正規化（CSV再読込で "True"/"False" 文字列になる対策）。"""
+    return str(value).strip().lower() in ("true", "1", "1.0", "yes")
+
+
+def exclude_provisional(df):
+    """仮登録の行を除いたコピーを返す（集計用）。"""
+    if "仮登録" not in df.columns:
+        return df
+    return df[~df["仮登録"].apply(is_provisional)].copy()
+
+
+def effective_amount_series(df):
+    """各行の実効金額（割引10%グループは×0.9）を Series で返す。元のdfは変更しない。"""
+    if "割引10%" not in df.columns:
+        return df["金額"].astype(float)
+    factor = np.where(df["割引10%"].apply(is_discounted), 0.9, 1.0)
+    return df["金額"] * factor
+
+
+def with_effective_amount(df):
+    """集計用に「実効金額」列を足したコピーを返す。元のdfは変更しない。"""
+    out = df.copy()
+    out["実効金額"] = effective_amount_series(out)
+    return out
+
+
+def group_total(group_df):
+    """1グループの割引適用後の合計金額（整数）。"""
+    return int(round(effective_amount_series(group_df).sum()))
+
+
+def group_is_discounted(group_df):
+    """そのグループが割引対象か（先頭行のフラグで判定。割引はグループ単位）。"""
+    if "割引10%" not in group_df.columns or len(group_df) == 0:
+        return False
+    return is_discounted(group_df["割引10%"].iloc[0])
+
+
+# ============================================================
 # 分析関数
 # ============================================================
 
@@ -359,28 +431,41 @@ def delete_group(group_id):
 def calc_sales_by_nationality(df):
     if df.empty:
         return pd.DataFrame()
-    return df.groupby("国籍")["金額"].sum().reset_index().rename(columns={"金額": "売上合計(円)"})
+    # 仮登録を除外してから、割引10%のグループは×0.9した実効金額で集計する（元の金額列は触らない）
+    df = exclude_provisional(df)
+    if df.empty:
+        return pd.DataFrame()
+    calc_df = with_effective_amount(df)
+    sales = calc_df.groupby("国籍")["実効金額"].sum().reset_index()
+    sales["実効金額"] = sales["実効金額"].round(0).astype(int)
+    return sales.rename(columns={"実効金額": "売上合計(円)"})
 
 
 @st.cache_data
 def calc_popular_menu_by_nationality(df, nationality):
     if df.empty:
         return pd.DataFrame()
+    df = exclude_provisional(df)
     filtered = df[df["国籍"] == nationality]
     if filtered.empty:
         return pd.DataFrame()
-    return filtered.groupby("メニュー名").agg(
+    calc_df = with_effective_amount(filtered)
+    popular = calc_df.groupby("メニュー名").agg(
         注文数=("数量", "sum"),
-        売上合計=("金額", "sum")
+        売上合計=("実効金額", "sum")
     ).reset_index().sort_values("注文数", ascending=False)
+    popular["売上合計"] = popular["売上合計"].round(0).astype(int)
+    return popular
 
 
 @st.cache_data
 def calc_avg_spend_per_person(df):
+    df = exclude_provisional(df)   # 仮登録を先に除外してから実効金額を出す
     if df.empty:
         return pd.DataFrame()
-    visit_summary = df.groupby(["顧客グループID", "国籍", "人数"]).agg(
-        合計金額=("金額", "sum")
+    calc_df = with_effective_amount(df)
+    visit_summary = calc_df.groupby(["顧客グループID", "国籍", "人数"]).agg(
+        合計金額=("実効金額", "sum")
     ).reset_index()
     visit_summary["客単価(円/人)"] = visit_summary["合計金額"] / visit_summary["人数"]
     avg_spend = visit_summary.groupby("国籍")["客単価(円/人)"].mean().reset_index()
@@ -395,6 +480,9 @@ def calc_avg_spend_per_person(df):
 def generate_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # 「注文データ」は元値（定価）のまま出す。
+        # 「国籍別売上」「平均客単価」は割引10%適用後（集計関数側で×0.9している）。
+        # こうすると1ファイルで定価ベースと実売上ベースの両方が見られる。
         df.to_excel(writer, sheet_name="注文データ", index=False)
         sales_df = calc_sales_by_nationality(df)
         if not sales_df.empty:
@@ -501,6 +589,8 @@ with st.sidebar.form("sidebar_form"):
     )
     num_people  = st.number_input("👥 人数（名）", min_value=1, max_value=20, value=2, step=1)
     visit_route = st.selectbox("📍 来店経路", options=VISIT_ROUTES)
+    discount_10 = st.checkbox("🏷️ 10%オフ", key="sidebar_disc",
+                              help="伝票に「10%off」と書かれている場合にチェック")
     st.form_submit_button("反映")
 
 st.sidebar.markdown("---")
@@ -711,13 +801,22 @@ else:
 
         st.sidebar.caption(f"　¥{item['unit_price']:,} × {item['quantity']} = ¥{subtotal:,}")
 
-    st.sidebar.markdown(f"### 合計: ¥{total:,}")
+    # 10%オフのチェックが入っていれば、保存前のカートでも割引後の合計を見せる
+    if discount_10:
+        net_total = int(round(total * 0.9))
+        st.sidebar.markdown(f"### 合計: ¥{net_total:,} 🏷️")
+        st.sidebar.caption(f"定価: ¥{total:,}　｜　10%オフ: -¥{total - net_total:,}")
+    else:
+        st.sidebar.markdown(f"### 合計: ¥{total:,}")
     st.sidebar.markdown("---")
 
     if st.sidebar.button("💾 このグループを保存", type="primary", use_container_width=True):
         group_id   = str(uuid.uuid4())[:8]
         menu_items = [(i["menu_name"], i["quantity"], i["quantity"] * i["unit_price"]) for i in st.session_state.cart]
-        add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id)
+        # サイドバーでOCRを使った場合は、その画像名（拡張子なし）を残す
+        _img_name = os.path.splitext(st.session_state.get("ocr_image", "") or "")[0]
+        add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
+                  image_name=_img_name, discount_10=discount_10)
 
         # 【最重要】AIの出力と人の修正結果を両方記録する。
         # この差分が読み取り精度そのものであり、12月の比較根拠になる。
@@ -773,7 +872,23 @@ with tab1:
         c1, c2, c3 = st.columns(3)
         c1.metric("総レコード数", f"{len(df)} 件")
         c2.metric("来店区分数",   f"{df['国籍'].apply(to_nationality_code).nunique()} 区分")
-        c3.metric("総売上",       f"¥{df['金額'].sum():,}")
+        # 総売上は割引10%を反映した実売上。定価ベースとの差は下のキャプションで出す
+        # 仮登録は未確定なので先に除外する（順序：仮登録除外 → 実効金額）
+        _conf_df     = exclude_provisional(df)
+        _gross_total = int(_conf_df["金額"].sum())
+        _net_total   = int(round(effective_amount_series(_conf_df).sum()))
+        c3.metric("総売上",       f"¥{_net_total:,}")
+        if _net_total != _gross_total:
+            st.caption(
+                f"※ 総売上は10%オフ適用後です（定価ベース: ¥{_gross_total:,}／"
+                f"割引分: -¥{_gross_total - _net_total:,}）"
+            )
+        _n_prov_groups = df.loc[df["仮登録"].apply(is_provisional), "顧客グループID"].nunique()
+        if _n_prov_groups:
+            st.caption(
+                f"🚩 仮登録 {_n_prov_groups} グループは総売上・分析に含めていません"
+                "（顧客グループ管理で修正して本登録にすると反映されます）"
+            )
         st.markdown("---")
         filt = st.multiselect("🔍 国籍フィルター", options=df["国籍"].unique(), default=[])
         disp = df[df["国籍"].isin(filt)] if filt else df
@@ -791,14 +906,21 @@ with tab1:
                 use_container_width=True
             )
         with dl_col2:
-            excel_data = generate_excel(df)
-            st.download_button(
-                "📊 Excelダウンロード（3シート）",
-                data=excel_data,
-                file_name=f"yakiniku_orders_{date.today()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            # Excelは3シートを丸ごと作り直すため重い。画面を開くたびに作らず、
+            # このボタンを押したときだけ生成する（CSVは保存のたびに更新済み）。
+            if st.button("📊 Excelを生成（3シート）", use_container_width=True,
+                         key="gen_excel_btn"):
+                with st.spinner("Excelを生成中..."):
+                    st.session_state.excel_bytes = generate_excel(df)
+            if st.session_state.get("excel_bytes"):
+                st.download_button(
+                    "⬇️ Excelダウンロード",
+                    data=st.session_state.excel_bytes,
+                    file_name=f"yakiniku_orders_{date.today()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_excel_btn"
+                )
 
 # タブ2：顧客グループ管理
 with tab2:
@@ -811,33 +933,140 @@ with tab2:
     if df.empty:
         st.info("データがありません。")
     else:
-        group_summary = df.groupby("顧客グループID").agg(
+        # 合計金額は割引10%を反映した実効金額で出す（保存されている金額は定価のまま）
+        _calc_df = with_effective_amount(df)
+        group_summary = _calc_df.groupby("顧客グループID").agg(
             日付=("日付", "first"),
             テーブル番号=("テーブル番号", "first"),
             国籍=("国籍", "first"),
             人数=("人数", "first"),
             来店経路=("来店経路", "first"),
-            合計金額=("金額", "sum"),
+            合計金額=("実効金額", "sum"),
             登録日時=("登録日時", "first"),
-        ).reset_index().sort_values("登録日時", ascending=False)
+            画像名=("画像名", "first"),
+        ).reset_index()
+        group_summary["合計金額"] = group_summary["合計金額"].round(0).astype(int)
+        # 割引対象グループのIDを先に集めておく（一覧の見出しでタグを出すため）
+        _disc_gids = (
+            set(df.loc[df["割引10%"].apply(is_discounted), "顧客グループID"])
+            if "割引10%" in df.columns else set()
+        )
+        # 仮登録グループのID（見出しの🚩と絞り込みに使う）
+        _prov_gids = set(df.loc[df["仮登録"].apply(is_provisional), "顧客グループID"])
 
-        st.markdown(f"**登録グループ数: {len(group_summary)} 件**")
+        # --- 絞り込み（国籍・仮登録）→ 並び替え → 表示 の順 ---
+        # 国籍は旧国名・新コードが混在しうるので、6区分コードに揃えて絞る
+        f_col1, f_col2 = st.columns([3, 1])
+        tab2_nat_filter = f_col1.multiselect(
+            "🔍 国籍フィルター", options=NATIONALITY_CODES,
+            format_func=lambda c: nationality_display(c), key="tab2_nat_filter")
+        f_col2.markdown("<div style='height: 1.9rem'></div>", unsafe_allow_html=True)
+        show_only_provisional = f_col2.checkbox(
+            f"🚩 仮登録のみ表示（{len(_prov_gids)} 件）", key="filter_provisional")
+        if tab2_nat_filter:
+            group_summary = group_summary[
+                group_summary["国籍"].apply(to_nationality_code).isin(tab2_nat_filter)]
+        if show_only_provisional:
+            group_summary = group_summary[group_summary["顧客グループID"].isin(_prov_gids)]
 
-        for _, row in group_summary.iterrows():
+        sort_col1, sort_col2 = st.columns(2)
+        sort_key = sort_col1.selectbox(
+            "並び替え", ["登録日時", "日付（来店日）", "合計金額"], key="tab2_sort_key")
+        sort_order = sort_col2.radio(
+            "順序", ["新しい順 / 大きい順", "古い順 / 小さい順"],
+            key="tab2_sort_order", horizontal=True)
+        _ascending = (sort_order == "古い順 / 小さい順")
+        _sort_col = {"日付（来店日）": "日付", "登録日時": "登録日時", "合計金額": "合計金額"}[sort_key]
+        # 日付・登録日時は日時として並べる（文字列のままだと桁で崩れるため）。
+        # 同じ値どうしは登録日時で並べて順序を安定させる
+        if _sort_col == "合計金額":
+            group_summary["_sortkey"] = pd.to_numeric(group_summary["合計金額"], errors="coerce")
+        else:
+            group_summary["_sortkey"] = pd.to_datetime(group_summary[_sort_col], errors="coerce")
+        group_summary["_sortkey2"] = pd.to_datetime(group_summary["登録日時"], errors="coerce")
+        group_summary = group_summary.sort_values(
+            ["_sortkey", "_sortkey2"], ascending=_ascending, na_position="last"
+        ).drop(columns=["_sortkey", "_sortkey2"])
+
+        # --- ページ送り：今のページの TAB2_PAGE_SIZE グループだけ描画する ---
+        # フィルター・並び替えが変わったら1ページ目に戻す（編集・保存・削除では同じページのまま）
+        _view_sig = (tuple(sorted(tab2_nat_filter)), show_only_provisional, sort_key, sort_order)
+        if st.session_state.get("tab2_view_sig") != _view_sig:
+            st.session_state["tab2_view_sig"] = _view_sig
+            st.session_state["tab2_page"] = 1
+        _n_groups    = len(group_summary)
+        _total_pages = max(1, -(-_n_groups // TAB2_PAGE_SIZE))
+        # 削除などで総ページ数が減ったときは最後のページに合わせる
+        _page = min(max(int(st.session_state.get("tab2_page", 1)), 1), _total_pages)
+        st.session_state["tab2_page"] = _page
+
+        def _tab2_set_page(p):
+            st.session_state["tab2_page"] = p
+
+        def _tab2_select_page(sel_key):
+            st.session_state["tab2_page"] = st.session_state[sel_key]
+
+        def _tab2_pager(pos):
+            """ページ移動の部品（一覧の上と下に置く。pos で key を分ける）"""
+            sel_key = f"tab2_page_sel_{pos}"
+            # 上下の selectbox を今のページに揃える（ウィジェット作成前なので代入してよい）
+            st.session_state[sel_key] = _page
+            pc1, pc2, pc3 = st.columns([1, 2, 1])
+            pc1.button("◀ 前へ", key=f"tab2_prev_{pos}", disabled=(_page <= 1),
+                       on_click=_tab2_set_page, args=(_page - 1,), use_container_width=True)
+            pc2.selectbox("ページ", list(range(1, _total_pages + 1)), key=sel_key,
+                          format_func=lambda p: f"{p} / {_total_pages} ページ",
+                          on_change=_tab2_select_page, args=(sel_key,),
+                          label_visibility="collapsed")
+            pc3.button("次へ ▶", key=f"tab2_next_{pos}", disabled=(_page >= _total_pages),
+                       on_click=_tab2_set_page, args=(_page + 1,), use_container_width=True)
+
+        if _n_groups == 0:
+            st.info("該当するグループがありません")
+            page_summary = group_summary.iloc[0:0]
+        else:
+            _start = (_page - 1) * TAB2_PAGE_SIZE
+            _end   = min(_start + TAB2_PAGE_SIZE, _n_groups)
+            st.markdown(f"**全 {_n_groups} グループ中 {_start + 1}〜{_end} 件目（{_page} / {_total_pages} ページ）**")
+            _tab2_pager("top")
+            page_summary = group_summary.iloc[_start:_end]
+
+        # ページ内グループの明細は、ループの前に1回だけまとめて取り出しておく
+        _page_gdfs = {
+            g: gd for g, gd in
+            df[df["顧客グループID"].isin(page_summary["顧客グループID"])].groupby("顧客グループID", sort=False)
+        }
+
+        for _, row in page_summary.iterrows():
             gid = row["顧客グループID"]
-            tbl = f"🪑{row['テーブル番号']}　" if str(row.get("テーブル番号", "")).strip() else ""
+            _tbl_val = fmt_table(row.get("テーブル番号", ""))
+            tbl = f"🪑{_tbl_val}　" if _tbl_val else ""
+            # 割引グループは一覧の見出しでも分かるようにタグを付ける
+            disc_tag = "🏷️" if gid in _disc_gids else ""
+            prov_tag = "🚩仮登録　" if gid in _prov_gids else ""
+            # 画像名は展開しなくても見えるよう見出しの末尾（IDの横）に出す。空なら付けない
+            _img = str(row.get("画像名", "")).strip()
+            img_tag = f"　📷 {_img}" if _img and _img.lower() != "nan" else ""
             with st.expander(
-                f"📅 {row['日付']}　{tbl}🌍 {row['国籍']}　👥 {row['人数']}名　"
-                f"💴 ¥{int(row['合計金額']):,}　[ID: {gid}]"
+                f"{prov_tag}📅 {row['日付']}　{tbl}🌍 {row['国籍']}　👥 {row['人数']}名　"
+                f"💴 ¥{int(row['合計金額']):,}{disc_tag}　[ID: {gid}]{img_tag}"
             ):
-                gdf = df[df["顧客グループID"] == gid].copy()
+                gdf = _page_gdfs.get(gid, df.iloc[0:0]).copy()
+                is_prov  = gid in _prov_gids
+                memo_val = str(gdf["メモ"].iloc[0]) if len(gdf) else ""
+                if memo_val.lower() == "nan":
+                    memo_val = ""
+                if is_prov:
+                    st.markdown("🚩 **仮登録（要確認・集計対象外）**")
+                    if memo_val:
+                        st.caption(f"📝 メモ: {memo_val}")
 
                 if st.session_state.editing_group == gid:
                     st.markdown("#### ✏️ 編集中")
                     with st.form(f"group_form_{gid}"):
                         ec1, ec2, ec3, ec4, ec5 = st.columns(5)
                         edit_date  = ec1.date_input("来店日", value=pd.to_datetime(row["日付"]).date(), key=f"edate_{gid}")
-                        edit_tbl   = ec2.text_input("テーブル番号", value=str(row.get("テーブル番号", "") or ""), key=f"etbl_{gid}")
+                        edit_tbl   = ec2.text_input("テーブル番号", value=fmt_table(row.get("テーブル番号", "")), key=f"etbl_{gid}")
                         _cur_code = to_nationality_code(row["国籍"])
                         edit_nat   = ec3.selectbox("国籍", NATIONALITY_CODES,
                                         index=NATIONALITY_CODES.index(_cur_code),
@@ -876,6 +1105,11 @@ with tab2:
                         manual_add_price = hc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key=f"emanual_price_{gid}")
                         manual_add_qty   = hc3.number_input("数量", min_value=1, max_value=99, value=1, key=f"emanual_qty_{gid}")
 
+                        st.markdown("**仮登録・メモ**")
+                        edit_prov = st.checkbox("🚩 仮登録のまま（直し終わったら外して保存 → 本登録になり集計に入ります）",
+                                                value=is_prov, key=f"eprov_{gid}")
+                        edit_memo = st.text_input("📝 メモ", value=memo_val, key=f"ememo_{gid}")
+
                         sc1, sc2 = st.columns(2)
                         submitted_save   = sc1.form_submit_button("💾 変更を保存", type="primary")
                         submitted_cancel = sc2.form_submit_button("❌ キャンセル")
@@ -890,6 +1124,11 @@ with tab2:
                         full_df = load_data()
                         full_df = full_df[full_df["顧客グループID"] != gid]
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # 編集で行を作り直すため、画像名・割引フラグは元の行から引き継ぐ
+                        keep_img  = str(gdf["画像名"].iloc[0]) if "画像名" in gdf.columns and len(gdf) else ""
+                        if keep_img.lower() == "nan":
+                            keep_img = ""
+                        keep_disc = group_is_discounted(gdf)
                         new_rows = [{
                             "日付":           str(edit_date),
                             "テーブル番号":   edit_tbl,
@@ -901,6 +1140,10 @@ with tab2:
                             "来店経路":       edit_route,
                             "顧客グループID": gid,
                             "登録日時":       now_str,
+                            "画像名":         keep_img,
+                            "割引10%":        keep_disc,
+                            "仮登録":         edit_prov,
+                            "メモ":           edit_memo,
                         } for r in edited_rows]
                         save_data(pd.concat([full_df, pd.DataFrame(new_rows)], ignore_index=True))
                         st.session_state.editing_group = None
@@ -912,11 +1155,25 @@ with tab2:
                         st.rerun()
 
                 else:
+                    # 明細は定価のまま表示し、合計だけ割引を反映する
                     show_df = gdf[["メニュー名", "数量", "金額"]].copy()
                     show_df["金額"] = show_df["金額"].apply(lambda x: f"¥{x:,}")
                     st.dataframe(show_df.reset_index(drop=True), use_container_width=True)
-                    tbl_disp = f"テーブル: {row['テーブル番号']}　｜　" if str(row.get("テーブル番号", "")).strip() else ""
+
+                    total       = group_total(gdf)
+                    gross_total = int(gdf["金額"].sum())
+                    if group_is_discounted(gdf):
+                        st.markdown(f"**合計: ¥{total:,}**　🏷️（10%オフ適用）")
+                        st.caption(f"定価合計: ¥{gross_total:,}　｜　割引分: -¥{gross_total - total:,}")
+                    else:
+                        st.markdown(f"**合計: ¥{total:,}**")
+
+                    tbl_disp = f"テーブル: {_tbl_val}　｜　" if _tbl_val else ""
                     st.caption(f"{tbl_disp}来店経路: {row['来店経路']}　｜　登録日時: {row['登録日時']}")
+
+                    img_name = str(gdf["画像名"].iloc[0]) if "画像名" in gdf.columns and len(gdf) else ""
+                    if img_name and img_name.lower() != "nan":
+                        st.caption(f"📷 元画像: {img_name}")
 
                     bc1, bc2 = st.columns(2)
                     if bc1.button("✏️ 編集", key=f"edit_group_{gid}"):
@@ -926,6 +1183,10 @@ with tab2:
                         delete_group(gid)
                         st.success("削除しました")
                         st.rerun()
+
+        # 一覧の下にも同じページ移動を置く
+        if _n_groups > 0:
+            _tab2_pager("bottom")
 
 # タブ3：国籍別売上
 with tab3:
