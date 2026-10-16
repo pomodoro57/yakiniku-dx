@@ -41,7 +41,7 @@ CSV_FILE   = os.path.join(BASE_DIR, "yakiniku_orders.csv")
 EXCEL_FILE = os.path.join(BASE_DIR, "yakiniku_orders.xlsx")
 
 # Googleスプレッドシート設定
-SPREADSHEET_ID       = "1FQJT7zJE3-sQOdchxcrohmI6BXUZ-rcyzuIUWAVzYFU"
+SPREADSHEET_ID       = "1F8bxccvpRPQdely0W9DU3gR0mDXYi1y4slez0MHm69E"
 SHEET_NAME           = "注文データ"
 SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service_account.json")
 GSPREAD_SCOPES       = [
