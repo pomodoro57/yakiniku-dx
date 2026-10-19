@@ -42,7 +42,7 @@ EXCEL_FILE = os.path.join(BASE_DIR, "yakiniku_orders.xlsx")
 
 # Googleスプレッドシート設定
 SPREADSHEET_ID       = "1F8bxccvpRPQdely0W9DU3gR0mDXYi1y4slez0MHm69E"
-SHEET_NAME           = "注文データ"
+SHEET_NAME           = "yakiniku_orders"
 SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service_account.json")
 GSPREAD_SCOPES       = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -242,6 +242,16 @@ def save_to_spreadsheet(df):
             ws = sh.worksheet(SHEET_NAME)
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=SHEET_NAME, rows=5000, cols=25)
+        # 安全装置：シート上の行数より極端に少ないデータで上書きしない
+        # （読み込み失敗で空のデータのまま保存し、1〜9月の記録が消える事故を防ぐ）
+        existing_rows = max(len(ws.get_all_values()) - 1, 0)
+        if existing_rows >= 50 and len(df) < existing_rows * 0.5:
+            st.error(
+                f"❌ 保存を中止しました。シートには {existing_rows} 行ありますが、"
+                f"保存しようとしたデータは {len(df)} 行です。"
+                "ページを再読み込みしてからもう一度お試しください。"
+            )
+            return False
         ws.clear()
         df_clean = df.fillna("").astype(str)
         ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
@@ -253,49 +263,50 @@ def save_to_spreadsheet(df):
 
 # ============================================================
 
-@st.cache_data
+def _normalize_orders(df):
+    """CSV・スプレッドシートどちらから読んでも、同じ列・型にそろえる。"""
+    if "顧客グループID" not in df.columns:
+        df["顧客グループID"] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
+    if "テーブル番号" not in df.columns:
+        df["テーブル番号"] = ""
+    if "画像名" not in df.columns:
+        df["画像名"] = ""          # 既存行は空
+    if "割引10%" not in df.columns:
+        df["割引10%"] = False       # 既存行は割引なし扱い
+    if "仮登録" not in df.columns:
+        df["仮登録"] = False        # 既存行は本登録扱い
+    if "メモ" not in df.columns:
+        df["メモ"] = ""             # 既存行はメモ空
+    for col in ["人数", "数量", "金額"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    for col in ["割引10%", "仮登録"]:
+        df[col] = (df[col].astype(str).str.strip().str.lower()
+                   .map({"true": True, "false": False, "1": True, "0": False})
+                   .fillna(False))
+    for col in ["画像名", "メモ"]:
+        df[col] = df[col].fillna("")
+    return df
+
+
+# ttl=60：他の端末（PC⇔スマホ）で保存した内容が、最大1分で反映される
+@st.cache_data(ttl=60)
 def load_data():
-    if os.path.exists(CSV_FILE):
-        df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
-        if "顧客グループID" not in df.columns:
-            df["顧客グループID"] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
-        if "テーブル番号" not in df.columns:
-            df["テーブル番号"] = ""
-        if "画像名" not in df.columns:
-            df["画像名"] = ""          # 既存行は空
-        if "割引10%" not in df.columns:
-            df["割引10%"] = False       # 既存行は割引なし扱い
-        if "仮登録" not in df.columns:
-            df["仮登録"] = False        # 既存行は本登録扱い
-        if "メモ" not in df.columns:
-            df["メモ"] = ""             # 既存行はメモ空
-        df["メモ"] = df["メモ"].fillna("")  # CSV再読込で空欄が NaN になる対策
-        return df
-    # スマホ版（Streamlit Cloud）：スプレッドシートから読み込む
+    # ① Googleスプレッドシートを正とする（PC・スマホ共通）
     client = get_gspread_client()
     if client is not None:
         try:
             sh = client.open_by_key(SPREADSHEET_ID)
-            try:
-                ws = sh.worksheet(SHEET_NAME)
-                data = ws.get_all_values()
-                if len(data) > 1:
-                    df = pd.DataFrame(data[1:], columns=data[0])
-                    for col in ["人数", "数量", "金額"]:
-                        if col in df.columns:
-                            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-                    for col in ["割引10%", "仮登録"]:
-                        if col in df.columns:
-                            df[col] = df[col].map({"True": True, "False": False}).fillna(False)
-                    for col in ["画像名", "メモ"]:
-                        if col not in df.columns:
-                            df[col] = ""
-                    df["メモ"] = df["メモ"].fillna("")
-                    return df
-            except Exception:
-                pass
+            ws = sh.worksheet(SHEET_NAME)
+            data = ws.get_all_values()
+            if len(data) > 1:
+                return _normalize_orders(pd.DataFrame(data[1:], columns=data[0]))
+            return _normalize_orders(pd.DataFrame(columns=data[0] if data else []))
         except Exception:
-            pass
+            pass  # 接続できないときは②へ
+    # ② スプレッドシートに接続できないときだけ、PCのCSV（バックアップ）を読む
+    if os.path.exists(CSV_FILE):
+        return _normalize_orders(pd.read_csv(CSV_FILE, encoding="utf-8-sig"))
     return pd.DataFrame(columns=[
         "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
         "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%",
@@ -321,6 +332,7 @@ def save_data(df):
 
 def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
               image_name="", discount_10=False, provisional=False, memo=""):
+    load_data.clear()  # 他端末の最新記録を取り込んでから追記する
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = [
@@ -346,6 +358,7 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
 
 
 def delete_group(group_id):
+    load_data.clear()  # 最新を読み直してから削除する
     df = load_data()
     save_data(df[df["顧客グループID"] != group_id])
 
@@ -1121,6 +1134,7 @@ with tab2:
                             edited_rows.append({"メニュー名": add_name, "数量": add_qty, "金額": add_price * add_qty})
                         if manual_add_name.strip():
                             edited_rows.append({"メニュー名": manual_add_name.strip(), "数量": manual_add_qty, "金額": manual_add_price * manual_add_qty})
+                        load_data.clear()  # 最新を読み直してから編集を反映する
                         full_df = load_data()
                         full_df = full_df[full_df["顧客グループID"] != gid]
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
