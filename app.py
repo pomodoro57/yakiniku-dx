@@ -97,6 +97,24 @@ VISIT_ROUTES = [
     "口コミ（知人紹介）", "ホテルフロント", "旅行会社", "その他"
 ]
 
+# チラシ（ビラ）を置いているホテル。効果測定用。ホテルが増えたらここに追加する。
+HOTEL_LIST = [
+    "なんばオリエンタルホテル",
+    "クロスホテル大阪",
+    "相鉄フレッサイン 大阪なんば駅前",
+    "ホテル京阪 なんば グランデ",
+    "アパホテル〈なんば駅東〉",
+    "ホテルロイヤルクラシック大阪",
+    "スイスホテル南海大阪",
+    "アパホテル＆リゾート〈大阪なんば駅前タワー〉",
+    "ホテルフォルツァ大阪なんば道頓堀",
+    "ホリデイ・イン大阪難波",
+    "Welina Hotel Premier 心斎橋",
+    "ホテルビスタ大阪［なんば］",
+]
+HOTEL_NONE = "（選択しない）"   # グループ編集の選択肢用
+FLYER_MARK = "あり"             # チラシ持参にチェックがあるときだけ記録する値（なしは空欄）
+
 # 生ビール大の価格: 来店日が2026/6/1以前→¥800、6/2以降→¥950（visit_date確定後に動的計算）
 
 # ============================================================
@@ -267,6 +285,7 @@ def save_to_spreadsheet(df):
 ORDER_COLUMNS = [
     "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
     "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%", "仮登録", "メモ",
+    "チラシ持参", "ホテル名",
 ]
 
 
@@ -284,6 +303,9 @@ def _normalize_orders(df):
         df["仮登録"] = False        # 既存行は本登録扱い
     if "メモ" not in df.columns:
         df["メモ"] = ""             # 既存行はメモ空
+    for col in ["チラシ持参", "ホテル名"]:
+        if col not in df.columns:
+            df[col] = ""            # 既存行はチラシなし（空欄）
     for col in ["人数", "数量", "金額"]:
         if col not in df.columns:
             df[col] = 0
@@ -292,7 +314,7 @@ def _normalize_orders(df):
         df[col] = (df[col].astype(str).str.strip().str.lower()
                    .map({"true": True, "false": False, "1": True, "0": False})
                    .fillna(False))
-    for col in ["画像名", "メモ"]:
+    for col in ["画像名", "メモ", "チラシ持参", "ホテル名"]:
         df[col] = df[col].fillna("")
     # 標準にない列があれば末尾に残し、標準の列は必ず標準の順に並べる
     for col in ORDER_COLUMNS:
@@ -320,11 +342,7 @@ def load_data():
     # ② スプレッドシートに接続できないときだけ、PCのCSV（バックアップ）を読む
     if os.path.exists(CSV_FILE):
         return _normalize_orders(pd.read_csv(CSV_FILE, encoding="utf-8-sig"))
-    return pd.DataFrame(columns=[
-        "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
-        "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%",
-        "仮登録", "メモ"
-    ])
+    return _normalize_orders(pd.DataFrame(columns=ORDER_COLUMNS))
 
 
 def save_data(df):
@@ -345,7 +363,8 @@ def save_data(df):
 
 
 def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
-              image_name="", discount_10=False, provisional=False, memo=""):
+              image_name="", discount_10=False, provisional=False, memo="",
+              flyer="", hotel=""):
     load_data.clear()  # 他端末の最新記録を取り込んでから追記する
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -365,6 +384,8 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
             "割引10%":        discount_10,
             "仮登録":         provisional,
             "メモ":           memo,
+            "チラシ持参":     flyer,
+            "ホテル名":       hotel,
         }
         for menu_name, quantity, price in menu_items
     ]
@@ -837,13 +858,29 @@ else:
         st.sidebar.markdown(f"### 合計: ¥{total:,}")
     st.sidebar.markdown("---")
 
+    # チラシ持参（ホテルに置いたビラの効果測定）。チェックを入れたときだけホテルを選ぶ。
+    # 保存のたびに keyの番号を進めて、次の伝票ではチェックが外れた状態に戻す。
+    _fv = st.session_state.get("flyer_ver", 0)
+    flyer_on = st.sidebar.checkbox("📄 チラシ持参", key=f"flyer_on_{_fv}")
+    flyer_hotel = ""
+    if flyer_on:
+        flyer_hotel = st.sidebar.selectbox(
+            "🏨 ホテル名", options=HOTEL_LIST, index=None,
+            placeholder="ホテルを選択", key=f"flyer_hotel_{_fv}",
+        ) or ""
+        if not flyer_hotel:
+            st.sidebar.caption("⚠️ ホテル名が未選択です（このまま保存するとホテル名は空欄になります）")
+    st.sidebar.markdown("---")
+
     if st.sidebar.button("💾 このグループを保存", type="primary", use_container_width=True):
         group_id   = str(uuid.uuid4())[:8]
         menu_items = [(i["menu_name"], i["quantity"], i["quantity"] * i["unit_price"]) for i in st.session_state.cart]
         # サイドバーでOCRを使った場合は、その画像名（拡張子なし）を残す
         _img_name = os.path.splitext(st.session_state.get("ocr_image", "") or "")[0]
         add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
-                  image_name=_img_name, discount_10=discount_10)
+                  image_name=_img_name, discount_10=discount_10,
+                  flyer=(FLYER_MARK if flyer_on else ""),
+                  hotel=(flyer_hotel if flyer_on else ""))
 
         # 【最重要】AIの出力と人の修正結果を両方記録する。
         # この差分が読み取り精度そのものであり、12月の比較根拠になる。
@@ -867,6 +904,7 @@ else:
         st.session_state.ocr_image   = ""
         st.session_state.ocr_elapsed = None
         st.session_state.cart = []
+        st.session_state.flyer_ver = _fv + 1   # チラシ・ホテルの入力を次の伝票用に戻す
         st.sidebar.success(f"✅ 保存しました！（ID: {group_id}）")
         st.rerun()
 
@@ -1132,6 +1170,20 @@ with tab2:
                         manual_add_price = hc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key=f"emanual_price_{gid}")
                         manual_add_qty   = hc3.number_input("数量", min_value=1, max_value=99, value=1, key=f"emanual_qty_{gid}")
 
+                        st.markdown("**チラシ・ホテル**")
+                        _cur_flyer = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
+                        _cur_hotel = str(gdf["ホテル名"].iloc[0]) if "ホテル名" in gdf.columns and len(gdf) else ""
+                        _cur_flyer = "" if _cur_flyer.lower() == "nan" else _cur_flyer
+                        _cur_hotel = "" if _cur_hotel.lower() == "nan" else _cur_hotel
+                        _hotel_opts = [HOTEL_NONE] + HOTEL_LIST + (
+                            [_cur_hotel] if _cur_hotel and _cur_hotel not in HOTEL_LIST else [])
+                        fc1, fc2 = st.columns(2)
+                        edit_flyer = fc1.checkbox("📄 チラシ持参", value=bool(_cur_flyer), key=f"eflyer_{gid}")
+                        edit_hotel = fc2.selectbox(
+                            "🏨 ホテル名（チラシ持参にチェックがあるときだけ記録）", _hotel_opts,
+                            index=_hotel_opts.index(_cur_hotel) if _cur_hotel in _hotel_opts else 0,
+                            key=f"ehotel_{gid}")
+
                         st.markdown("**仮登録・メモ**")
                         edit_prov = st.checkbox("🚩 仮登録のまま（直し終わったら外して保存 → 本登録になり集計に入ります）",
                                                 value=is_prov, key=f"eprov_{gid}")
@@ -1172,6 +1224,8 @@ with tab2:
                             "割引10%":        keep_disc,
                             "仮登録":         edit_prov,
                             "メモ":           edit_memo,
+                            "チラシ持参":     FLYER_MARK if edit_flyer else "",
+                            "ホテル名":       edit_hotel if (edit_flyer and edit_hotel != HOTEL_NONE) else "",
                         } for r in edited_rows]
                         save_data(pd.concat([full_df, pd.DataFrame(new_rows)], ignore_index=True))
                         st.session_state.editing_group = None
@@ -1202,6 +1256,11 @@ with tab2:
                     img_name = str(gdf["画像名"].iloc[0]) if "画像名" in gdf.columns and len(gdf) else ""
                     if img_name and img_name.lower() != "nan":
                         st.caption(f"📷 元画像: {img_name}")
+
+                    _fl = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
+                    _ht = str(gdf["ホテル名"].iloc[0]) if "ホテル名" in gdf.columns and len(gdf) else ""
+                    if _fl and _fl.lower() != "nan":
+                        st.caption("📄 チラシ持参" + (f"：{_ht}" if _ht and _ht.lower() != "nan" else "（ホテル名なし）"))
 
                     bc1, bc2 = st.columns(2)
                     if bc1.button("✏️ 編集", key=f"edit_group_{gid}"):
