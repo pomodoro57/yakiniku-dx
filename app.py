@@ -263,8 +263,15 @@ def save_to_spreadsheet(df):
 
 # ============================================================
 
+# スプレッドシートの列の標準順（1枚目 yakiniku_orders と同じ並び）
+ORDER_COLUMNS = [
+    "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
+    "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%", "仮登録", "メモ",
+]
+
+
 def _normalize_orders(df):
-    """CSV・スプレッドシートどちらから読んでも、同じ列・型にそろえる。"""
+    """CSV・スプレッドシートどちらから読んでも、同じ列・型・並び順にそろえる。"""
     if "顧客グループID" not in df.columns:
         df["顧客グループID"] = [str(uuid.uuid4())[:8] for _ in range(len(df))]
     if "テーブル番号" not in df.columns:
@@ -278,15 +285,21 @@ def _normalize_orders(df):
     if "メモ" not in df.columns:
         df["メモ"] = ""             # 既存行はメモ空
     for col in ["人数", "数量", "金額"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
     for col in ["割引10%", "仮登録"]:
         df[col] = (df[col].astype(str).str.strip().str.lower()
                    .map({"true": True, "false": False, "1": True, "0": False})
                    .fillna(False))
     for col in ["画像名", "メモ"]:
         df[col] = df[col].fillna("")
-    return df
+    # 標準にない列があれば末尾に残し、標準の列は必ず標準の順に並べる
+    for col in ORDER_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    extra = [c for c in df.columns if c not in ORDER_COLUMNS]
+    return df[ORDER_COLUMNS + extra]
 
 
 # ttl=60：他の端末（PC⇔スマホ）で保存した内容が、最大1分で反映される
@@ -315,6 +328,7 @@ def load_data():
 
 
 def save_data(df):
+    df = _normalize_orders(df.copy())  # 列の並び順と数値の形を標準にそろえてから保存
     # CSVのみ即保存する（軽い）。Excelは保存のたびに作らず、
     # タブ1の「Excelを生成」ボタンを押したときだけ generate_excel で生成する。
     # （Excel再生成が保存のたびに走ると「登録して次へ」が待たされるため）
