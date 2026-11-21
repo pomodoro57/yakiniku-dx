@@ -97,22 +97,12 @@ VISIT_ROUTES = [
     "口コミ（知人紹介）", "ホテルフロント", "旅行会社", "その他"
 ]
 
-# チラシ（ビラ）を置いているホテル。効果測定用。ホテルが増えたらここに追加する。
-HOTEL_LIST = [
-    "なんばオリエンタルホテル",
-    "クロスホテル大阪",
-    "相鉄フレッサイン 大阪なんば駅前",
-    "ホテル京阪 なんば グランデ",
-    "アパホテル〈なんば駅東〉",
-    "ホテルロイヤルクラシック大阪",
-    "スイスホテル南海大阪",
-    "アパホテル＆リゾート〈大阪なんば駅前タワー〉",
-    "ホテルフォルツァ大阪なんば道頓堀",
-    "ホリデイ・イン大阪難波",
-    "Welina Hotel Premier 心斎橋",
-    "ホテルビスタ大阪［なんば］",
+# 来店時間：営業時間（17〜23時）を1時間ごとに区切った時間帯。保存する値もこの文字列。
+VISIT_SLOTS = [
+    "17:00〜18:00", "18:00〜19:00", "19:00〜20:00",
+    "20:00〜21:00", "21:00〜22:00", "22:00〜23:00",
 ]
-HOTEL_NONE = "（選択しない）"   # グループ編集の選択肢用
+SLOT_NONE = "（未選択）"        # グループ編集の選択肢用
 FLYER_MARK = "あり"             # チラシ持参にチェックがあるときだけ記録する値（なしは空欄）
 
 # 生ビール大の価格: 来店日が2026/6/1以前→¥800、6/2以降→¥950（visit_date確定後に動的計算）
@@ -282,10 +272,19 @@ def save_to_spreadsheet(df):
 # ============================================================
 
 # スプレッドシートの列の標準順（1枚目 yakiniku_orders と同じ並び）
+def time_to_slot(hhmm):
+    """「19:30」のような時刻を、VISIT_SLOTS の時間帯に変換する。17時〜23時の外・読めない場合は空欄。"""
+    m = re.search(r"(\d{1,2})\s*[:：時]", str(hhmm or ""))
+    if not m:
+        return ""
+    hour = int(m.group(1))
+    return VISIT_SLOTS[hour - 17] if 17 <= hour <= 22 else ""
+
+
 ORDER_COLUMNS = [
     "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
     "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%", "仮登録", "メモ",
-    "チラシ持参", "ホテル名",
+    "チラシ持参", "来店時間",
 ]
 
 
@@ -303,9 +302,9 @@ def _normalize_orders(df):
         df["仮登録"] = False        # 既存行は本登録扱い
     if "メモ" not in df.columns:
         df["メモ"] = ""             # 既存行はメモ空
-    for col in ["チラシ持参", "ホテル名"]:
+    for col in ["チラシ持参", "来店時間"]:
         if col not in df.columns:
-            df[col] = ""            # 既存行はチラシなし（空欄）
+            df[col] = ""            # 既存行はチラシなし・来店時間なし（空欄）
     for col in ["人数", "数量", "金額"]:
         if col not in df.columns:
             df[col] = 0
@@ -314,8 +313,11 @@ def _normalize_orders(df):
         df[col] = (df[col].astype(str).str.strip().str.lower()
                    .map({"true": True, "false": False, "1": True, "0": False})
                    .fillna(False))
-    for col in ["画像名", "メモ", "チラシ持参", "ホテル名"]:
+    for col in ["画像名", "メモ", "チラシ持参", "来店時間"]:
         df[col] = df[col].fillna("")
+    # 廃止した「ホテル名」列：中身が空なら取り除く（値が入っている行があれば、データ保護のため残す）
+    if "ホテル名" in df.columns and (df["ホテル名"].fillna("").astype(str).str.strip() == "").all():
+        df = df.drop(columns=["ホテル名"])
     # 標準にない列があれば末尾に残し、標準の列は必ず標準の順に並べる
     for col in ORDER_COLUMNS:
         if col not in df.columns:
@@ -364,7 +366,7 @@ def save_data(df):
 
 def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
               image_name="", discount_10=False, provisional=False, memo="",
-              flyer="", hotel=""):
+              flyer="", visit_slot=""):
     load_data.clear()  # 他端末の最新記録を取り込んでから追記する
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -385,7 +387,7 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
             "仮登録":         provisional,
             "メモ":           memo,
             "チラシ持参":     flyer,
-            "ホテル名":       hotel,
+            "来店時間":       visit_slot,
         }
         for menu_name, quantity, price in menu_items
     ]
@@ -624,11 +626,18 @@ st.caption("大学ゼミ研究用 | 外国人観光客向け注文データ分�
 st.sidebar.header("📝 注文入力")
 st.sidebar.markdown("---")
 
+# 保存した直後は、チラシ持参のチェックと来店時間を空に戻す（次の伝票に持ち越さない）
+if st.session_state.pop("_reset_sidebar", False):
+    st.session_state["sidebar_flyer"] = False
+    st.session_state["sidebar_slot"] = None
+
 st.sidebar.subheader("来店情報")
 with st.sidebar.form("sidebar_form"):
     visit_date  = st.date_input("📅 来店日", value=date.today())
     # 来店日が2026/6/1以前なら¥800、6/2以降なら¥950
     beer_large_price = 800 if visit_date <= date(2026, 6, 1) else 950
+    visit_slot  = st.selectbox("🕐 来店時間", options=VISIT_SLOTS, index=None,
+                               placeholder="時間帯を選択（17〜23時）", key="sidebar_slot") or ""
     table_num   = st.text_input("🪑 テーブル番号", placeholder="例：3、A-2")
     nationality = st.selectbox(
         "🌍 国籍",
@@ -639,6 +648,8 @@ with st.sidebar.form("sidebar_form"):
     visit_route = st.selectbox("📍 来店経路", options=VISIT_ROUTES)
     discount_10 = st.checkbox("🏷️ 10%オフ", key="sidebar_disc",
                               help="伝票に「10%off」と書かれている場合にチェック")
+    flyer_on = st.checkbox("📄 チラシ持参", key="sidebar_flyer",
+                           help="ホテルのチラシを持って来店したグループにチェック")
     st.form_submit_button("反映")
 
 st.sidebar.markdown("---")
@@ -858,19 +869,12 @@ else:
         st.sidebar.markdown(f"### 合計: ¥{total:,}")
     st.sidebar.markdown("---")
 
-    # チラシ持参（ホテルに置いたビラの効果測定）。チェックを入れたときだけホテルを選ぶ。
-    # 保存のたびに keyの番号を進めて、次の伝票ではチェックが外れた状態に戻す。
-    _fv = st.session_state.get("flyer_ver", 0)
-    flyer_on = st.sidebar.checkbox("📄 チラシ持参", key=f"flyer_on_{_fv}")
-    flyer_hotel = ""
-    if flyer_on:
-        flyer_hotel = st.sidebar.selectbox(
-            "🏨 ホテル名", options=HOTEL_LIST, index=None,
-            placeholder="ホテルを選択", key=f"flyer_hotel_{_fv}",
-        ) or ""
-        if not flyer_hotel:
-            st.sidebar.caption("⚠️ ホテル名が未選択です（このまま保存するとホテル名は空欄になります）")
-    st.sidebar.markdown("---")
+    # 来店時間：入力があればそれを使う。未入力のときは、AIが伝票から読んだ時間を使う（17〜23時の外は空欄）
+    _ocr_time = (st.session_state.get("ocr_header") or {}).get("visit_time")
+    _slot_ocr = time_to_slot(_ocr_time)
+    if not visit_slot and _slot_ocr:
+        st.sidebar.caption(f"🕐 来店時間は未選択のため、AIが読んだ {_ocr_time} から「{_slot_ocr}」で記録します")
+    _slot_final = visit_slot or _slot_ocr
 
     if st.sidebar.button("💾 このグループを保存", type="primary", use_container_width=True):
         group_id   = str(uuid.uuid4())[:8]
@@ -880,7 +884,7 @@ else:
         add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
                   image_name=_img_name, discount_10=discount_10,
                   flyer=(FLYER_MARK if flyer_on else ""),
-                  hotel=(flyer_hotel if flyer_on else ""))
+                  visit_slot=_slot_final)
 
         # 【最重要】AIの出力と人の修正結果を両方記録する。
         # この差分が読み取り精度そのものであり、12月の比較根拠になる。
@@ -904,7 +908,7 @@ else:
         st.session_state.ocr_image   = ""
         st.session_state.ocr_elapsed = None
         st.session_state.cart = []
-        st.session_state.flyer_ver = _fv + 1   # チラシ・ホテルの入力を次の伝票用に戻す
+        st.session_state["_reset_sidebar"] = True   # チラシ・来店時間を次の伝票用に空へ戻す
         st.sidebar.success(f"✅ 保存しました！（ID: {group_id}）")
         st.rerun()
 
@@ -1129,17 +1133,24 @@ with tab2:
                 if st.session_state.editing_group == gid:
                     st.markdown("#### ✏️ 編集中")
                     with st.form(f"group_form_{gid}"):
-                        ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                        ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
                         edit_date  = ec1.date_input("来店日", value=pd.to_datetime(row["日付"]).date(), key=f"edate_{gid}")
-                        edit_tbl   = ec2.text_input("テーブル番号", value=fmt_table(row.get("テーブル番号", "")), key=f"etbl_{gid}")
+                        _cur_slot = str(gdf["来店時間"].iloc[0]) if "来店時間" in gdf.columns and len(gdf) else ""
+                        _cur_slot = "" if _cur_slot.lower() == "nan" else _cur_slot
+                        _slot_opts = [SLOT_NONE] + VISIT_SLOTS + (
+                            [_cur_slot] if _cur_slot and _cur_slot not in VISIT_SLOTS else [])
+                        edit_slot  = ec2.selectbox("来店時間", _slot_opts,
+                                        index=_slot_opts.index(_cur_slot) if _cur_slot in _slot_opts else 0,
+                                        key=f"eslot_{gid}")
+                        edit_tbl   = ec3.text_input("テーブル番号", value=fmt_table(row.get("テーブル番号", "")), key=f"etbl_{gid}")
                         _cur_code = to_nationality_code(row["国籍"])
-                        edit_nat   = ec3.selectbox("国籍", NATIONALITY_CODES,
+                        edit_nat   = ec4.selectbox("国籍", NATIONALITY_CODES,
                                         index=NATIONALITY_CODES.index(_cur_code),
                                         format_func=lambda c: nationality_display(c),
                                         key=f"enat_{gid}")
-                        edit_ppl   = ec4.number_input("人数", min_value=1, max_value=20,
+                        edit_ppl   = ec5.number_input("人数", min_value=1, max_value=20,
                                         value=int(row["人数"]), key=f"eppl_{gid}")
-                        edit_route = ec5.selectbox("来店経路", VISIT_ROUTES,
+                        edit_route = ec6.selectbox("来店経路", VISIT_ROUTES,
                                         index=VISIT_ROUTES.index(row["来店経路"]) if row["来店経路"] in VISIT_ROUTES else 0,
                                         key=f"eroute_{gid}")
 
@@ -1170,19 +1181,10 @@ with tab2:
                         manual_add_price = hc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key=f"emanual_price_{gid}")
                         manual_add_qty   = hc3.number_input("数量", min_value=1, max_value=99, value=1, key=f"emanual_qty_{gid}")
 
-                        st.markdown("**チラシ・ホテル**")
+                        st.markdown("**チラシ**")
                         _cur_flyer = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
-                        _cur_hotel = str(gdf["ホテル名"].iloc[0]) if "ホテル名" in gdf.columns and len(gdf) else ""
                         _cur_flyer = "" if _cur_flyer.lower() == "nan" else _cur_flyer
-                        _cur_hotel = "" if _cur_hotel.lower() == "nan" else _cur_hotel
-                        _hotel_opts = [HOTEL_NONE] + HOTEL_LIST + (
-                            [_cur_hotel] if _cur_hotel and _cur_hotel not in HOTEL_LIST else [])
-                        fc1, fc2 = st.columns(2)
-                        edit_flyer = fc1.checkbox("📄 チラシ持参", value=bool(_cur_flyer), key=f"eflyer_{gid}")
-                        edit_hotel = fc2.selectbox(
-                            "🏨 ホテル名（チラシ持参にチェックがあるときだけ記録）", _hotel_opts,
-                            index=_hotel_opts.index(_cur_hotel) if _cur_hotel in _hotel_opts else 0,
-                            key=f"ehotel_{gid}")
+                        edit_flyer = st.checkbox("📄 チラシ持参", value=bool(_cur_flyer), key=f"eflyer_{gid}")
 
                         st.markdown("**仮登録・メモ**")
                         edit_prov = st.checkbox("🚩 仮登録のまま（直し終わったら外して保存 → 本登録になり集計に入ります）",
@@ -1225,8 +1227,13 @@ with tab2:
                             "仮登録":         edit_prov,
                             "メモ":           edit_memo,
                             "チラシ持参":     FLYER_MARK if edit_flyer else "",
-                            "ホテル名":       edit_hotel if (edit_flyer and edit_hotel != HOTEL_NONE) else "",
+                            "来店時間":       "" if edit_slot == SLOT_NONE else edit_slot,
                         } for r in edited_rows]
+                        if "ホテル名" in gdf.columns and len(gdf):   # 廃止した列に値が残っている場合は、編集で消さない
+                            _kh = str(gdf["ホテル名"].iloc[0])
+                            _kh = "" if _kh.lower() == "nan" else _kh
+                            for _r in new_rows:
+                                _r["ホテル名"] = _kh
                         save_data(pd.concat([full_df, pd.DataFrame(new_rows)], ignore_index=True))
                         st.session_state.editing_group = None
                         st.success("✅ 保存しました")
@@ -1257,10 +1264,12 @@ with tab2:
                     if img_name and img_name.lower() != "nan":
                         st.caption(f"📷 元画像: {img_name}")
 
+                    _sl = str(gdf["来店時間"].iloc[0]) if "来店時間" in gdf.columns and len(gdf) else ""
+                    if _sl and _sl.lower() != "nan":
+                        st.caption(f"🕐 来店時間: {_sl}")
                     _fl = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
-                    _ht = str(gdf["ホテル名"].iloc[0]) if "ホテル名" in gdf.columns and len(gdf) else ""
                     if _fl and _fl.lower() != "nan":
-                        st.caption("📄 チラシ持参" + (f"：{_ht}" if _ht and _ht.lower() != "nan" else "（ホテル名なし）"))
+                        st.caption("📄 チラシ持参")
 
                     bc1, bc2 = st.columns(2)
                     if bc1.button("✏️ 編集", key=f"edit_group_{gid}"):
@@ -1366,9 +1375,16 @@ st.caption("🎓 大学ゼミ研究用プロトタイプ ｜ データは yakini
 # タブ6：一括読み取り（AI優先・PC用）
 # 手入力を極力使わず、複数の伝票をまとめて処理する
 # ============================================================
+def add_order_batch(*args, **kwargs):
+    """一括読み取りタブ用：画面の来店時間（HH:MM）を時間帯に直して、注文データの「来店時間」列にも保存する。"""
+    _t = st.session_state.get(f"btm_{st.session_state.get('batch_idx', 0)}", "")
+    kwargs.setdefault("visit_slot", time_to_slot(_t))
+    return add_order(*args, **kwargs)
+
+
 with tab6:
     dx.render_batch_tab(
-        st, pd, add_order, ALL_MENUS, NATIONALITY_CODES,
+        st, pd, add_order_batch, ALL_MENUS, NATIONALITY_CODES,
         VISIT_ROUTES, ocr_receipt_with_gemini,
         uuid, date, time,
     )
