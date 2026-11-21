@@ -98,10 +98,13 @@ VISIT_ROUTES = [
 ]
 
 # 来店時間：営業時間（17〜23時）を1時間ごとに区切った時間帯。保存する値もこの文字列。
-VISIT_SLOTS = [
-    "17:00〜18:00", "18:00〜19:00", "19:00〜20:00",
-    "20:00〜21:00", "21:00〜22:00", "22:00〜23:00",
-]
+# 「18時台」＝18:00〜18:59（19:00ちょうどは「19時台」）
+VISIT_SLOTS = ["17時台", "18時台", "19時台", "20時台", "21時台", "22時台"]
+# 以前「19:00〜20:00」の形で保存した行は、読み込み時に自動で「19時台」へ読み替える
+LEGACY_VISIT_SLOTS = {
+    "17:00〜18:00": "17時台", "18:00〜19:00": "18時台", "19:00〜20:00": "19時台",
+    "20:00〜21:00": "20時台", "21:00〜22:00": "21時台", "22:00〜23:00": "22時台",
+}
 SLOT_NONE = "（未選択）"        # グループ編集の選択肢用
 FLYER_MARK = "あり"             # チラシ持参にチェックがあるときだけ記録する値（なしは空欄）
 
@@ -315,6 +318,7 @@ def _normalize_orders(df):
                    .fillna(False))
     for col in ["画像名", "メモ", "チラシ持参", "来店時間"]:
         df[col] = df[col].fillna("")
+    df["来店時間"] = df["来店時間"].replace(LEGACY_VISIT_SLOTS)   # 旧表記（19:00〜20:00）→ 19時台
     # 廃止した「ホテル名」列：中身が空なら取り除く（値が入っている行があれば、データ保護のため残す）
     if "ホテル名" in df.columns and (df["ホテル名"].fillna("").astype(str).str.strip() == "").all():
         df = df.drop(columns=["ホテル名"])
@@ -637,7 +641,7 @@ with st.sidebar.form("sidebar_form"):
     # 来店日が2026/6/1以前なら¥800、6/2以降なら¥950
     beer_large_price = 800 if visit_date <= date(2026, 6, 1) else 950
     visit_slot  = st.selectbox("🕐 来店時間", options=VISIT_SLOTS, index=None,
-                               placeholder="時間帯を選択（17〜23時）", key="sidebar_slot") or ""
+                               placeholder="時間帯を選択（17時台〜22時台）", key="sidebar_slot") or ""
     table_num   = st.text_input("🪑 テーブル番号", placeholder="例：3、A-2")
     nationality = st.selectbox(
         "🌍 国籍",
