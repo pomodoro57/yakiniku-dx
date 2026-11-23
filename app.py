@@ -105,7 +105,6 @@ LEGACY_VISIT_SLOTS = {
     "17:00〜18:00": "17時台", "18:00〜19:00": "18時台", "19:00〜20:00": "19時台",
     "20:00〜21:00": "20時台", "21:00〜22:00": "21時台", "22:00〜23:00": "22時台",
 }
-SLOT_NONE = "（未選択）"        # グループ編集の選択肢用
 FLYER_MARK = "あり"             # チラシ持参にチェックがあるときだけ記録する値（なしは空欄）
 
 # 生ビール大の価格: 来店日が2026/6/1以前→¥800、6/2以降→¥950（visit_date確定後に動的計算）
@@ -275,19 +274,39 @@ def save_to_spreadsheet(df):
 # ============================================================
 
 # スプレッドシートの列の標準順（1枚目 yakiniku_orders と同じ並び）
-def time_to_slot(hhmm):
-    """「19:30」のような時刻を、VISIT_SLOTS の時間帯に変換する。17時〜23時の外・読めない場合は空欄。"""
-    m = re.search(r"(\d{1,2})\s*[:：時]", str(hhmm or ""))
+def parse_visit_time(text):
+    """来店時間の入力を、24時間表記の「HH:MM」にそろえる。読めないときは空文字。
+    受け付ける形：19:30 / 1930 / 19時30分 / 19時 / 19.30（全角も可）。
+    営業時間は17〜23時なので、5〜11時の入力は午後（+12時間）とみなす（例：6:50 → 18:50）。"""
+    t = str(text or "").strip().translate(str.maketrans("０１２３４５６７８９：．", "0123456789:."))
+    m = (re.fullmatch(r"(\d{1,2})\s*[:.]\s*(\d{2})(?:\s*:\s*\d{2})?", t)
+         or re.fullmatch(r"(\d{1,2})\s*時\s*(?:(\d{1,2})\s*分?)?", t)
+         or re.fullmatch(r"(\d{1,2})(\d{2})", t))
     if not m:
         return ""
-    hour = int(m.group(1))
+    hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    if minute > 59:
+        return ""
+    if 5 <= hour <= 11:
+        hour += 12
+    if hour > 23:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def time_to_slot(hhmm):
+    """時刻（19:30など）を、VISIT_SLOTS の時間帯（19時台）に変換する。17時台〜22時台の外・読めない場合は空欄。"""
+    t = parse_visit_time(hhmm)
+    if not t:
+        return ""
+    hour = int(t[:2])
     return VISIT_SLOTS[hour - 17] if 17 <= hour <= 22 else ""
 
 
 ORDER_COLUMNS = [
     "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
     "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%", "仮登録", "メモ",
-    "チラシ持参", "来店時間",
+    "チラシ持参", "来店時間", "時間帯",
 ]
 
 
@@ -305,7 +324,7 @@ def _normalize_orders(df):
         df["仮登録"] = False        # 既存行は本登録扱い
     if "メモ" not in df.columns:
         df["メモ"] = ""             # 既存行はメモ空
-    for col in ["チラシ持参", "来店時間"]:
+    for col in ["チラシ持参", "来店時間", "時間帯"]:
         if col not in df.columns:
             df[col] = ""            # 既存行はチラシなし・来店時間なし（空欄）
     for col in ["人数", "数量", "金額"]:
@@ -316,9 +335,16 @@ def _normalize_orders(df):
         df[col] = (df[col].astype(str).str.strip().str.lower()
                    .map({"true": True, "false": False, "1": True, "0": False})
                    .fillna(False))
-    for col in ["画像名", "メモ", "チラシ持参", "来店時間"]:
+    for col in ["画像名", "メモ", "チラシ持参", "来店時間", "時間帯"]:
         df[col] = df[col].fillna("")
-    df["来店時間"] = df["来店時間"].replace(LEGACY_VISIT_SLOTS)   # 旧表記（19:00〜20:00）→ 19時台
+    # 来店時間（正確な時刻 HH:MM）と、時間帯（19時台）をそろえる
+    _t = df["来店時間"].astype(str).str.strip().replace(LEGACY_VISIT_SLOTS)   # 旧表記（19:00〜20:00）→ 19時台
+    _slot = df["時間帯"].astype(str).str.strip().replace(LEGACY_VISIT_SLOTS)
+    _slot = _slot.where(~_t.isin(VISIT_SLOTS), _t)   # 以前「来店時間」の列に入れていた「19時台」は、時間帯の列へ移す
+    _exact = _t.map(parse_visit_time)                # 時刻として読めるものだけ「HH:MM」にする
+    df["来店時間"] = _exact
+    df["時間帯"] = [time_to_slot(e) if e else (s_ if s_ in VISIT_SLOTS else "")
+                    for e, s_ in zip(_exact, _slot)]   # 時刻があれば、時間帯は時刻から決める
     # 廃止した「ホテル名」列：中身が空なら取り除く（値が入っている行があれば、データ保護のため残す）
     if "ホテル名" in df.columns and (df["ホテル名"].fillna("").astype(str).str.strip() == "").all():
         df = df.drop(columns=["ホテル名"])
@@ -370,10 +396,11 @@ def save_data(df):
 
 def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
               image_name="", discount_10=False, provisional=False, memo="",
-              flyer="", visit_slot=""):
+              flyer="", visit_time=""):
     load_data.clear()  # 他端末の最新記録を取り込んでから追記する
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _vt = parse_visit_time(visit_time)   # 正確な来店時間（HH:MM）。読めなければ空欄
     rows = [
         {
             "日付":           str(visit_date),
@@ -391,7 +418,8 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
             "仮登録":         provisional,
             "メモ":           memo,
             "チラシ持参":     flyer,
-            "来店時間":       visit_slot,
+            "来店時間":       _vt,
+            "時間帯":         time_to_slot(_vt),
         }
         for menu_name, quantity, price in menu_items
     ]
@@ -633,15 +661,15 @@ st.sidebar.markdown("---")
 # 保存した直後は、チラシ持参のチェックと来店時間を空に戻す（次の伝票に持ち越さない）
 if st.session_state.pop("_reset_sidebar", False):
     st.session_state["sidebar_flyer"] = False
-    st.session_state["sidebar_slot"] = None
+    st.session_state["sidebar_time"] = ""
 
 st.sidebar.subheader("来店情報")
 with st.sidebar.form("sidebar_form"):
     visit_date  = st.date_input("📅 来店日", value=date.today())
     # 来店日が2026/6/1以前なら¥800、6/2以降なら¥950
     beer_large_price = 800 if visit_date <= date(2026, 6, 1) else 950
-    visit_slot  = st.selectbox("🕐 来店時間", options=VISIT_SLOTS, index=None,
-                               placeholder="時間帯を選択（17時台〜22時台）", key="sidebar_slot") or ""
+    visit_time_raw = st.text_input("🕐 来店時間", key="sidebar_time", placeholder="例：19:30",
+                                   help="24時間表記で入力（19:30、1930、19時30分でもOK）。6:50のように午前の時刻を書くと、営業時間から午後（18:50）とみなします。")
     table_num   = st.text_input("🪑 テーブル番号", placeholder="例：3、A-2")
     nationality = st.selectbox(
         "🌍 国籍",
@@ -873,12 +901,15 @@ else:
         st.sidebar.markdown(f"### 合計: ¥{total:,}")
     st.sidebar.markdown("---")
 
-    # 来店時間：入力があればそれを使う。未入力のときは、AIが伝票から読んだ時間を使う（17〜23時の外は空欄）
-    _ocr_time = (st.session_state.get("ocr_header") or {}).get("visit_time")
-    _slot_ocr = time_to_slot(_ocr_time)
-    if not visit_slot and _slot_ocr:
-        st.sidebar.caption(f"🕐 来店時間は未選択のため、AIが読んだ {_ocr_time} から「{_slot_ocr}」で記録します")
-    _slot_final = visit_slot or _slot_ocr
+    # 来店時間：入力（手入力）があればそれを使う。空欄のときは、AIが伝票から読んだ時間を使う
+    _time_in  = parse_visit_time(visit_time_raw)
+    _time_ocr = parse_visit_time((st.session_state.get("ocr_header") or {}).get("visit_time"))
+    _time_final = _time_in if visit_time_raw.strip() else _time_ocr
+    if visit_time_raw.strip() and not _time_in:
+        st.sidebar.warning("🕐 来店時間の形式が正しくありません（例：19:30）。このままだと来店時間は空欄で保存されます")
+    elif _time_final:
+        _src = "" if visit_time_raw.strip() else "（AIが伝票から読み取った時間）"
+        st.sidebar.caption(f"🕐 来店時間 {_time_final}（{time_to_slot(_time_final) or '17時台〜22時台の外'}）で記録します{_src}")
 
     if st.sidebar.button("💾 このグループを保存", type="primary", use_container_width=True):
         group_id   = str(uuid.uuid4())[:8]
@@ -888,7 +919,7 @@ else:
         add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
                   image_name=_img_name, discount_10=discount_10,
                   flyer=(FLYER_MARK if flyer_on else ""),
-                  visit_slot=_slot_final)
+                  visit_time=_time_final)
 
         # 【最重要】AIの出力と人の修正結果を両方記録する。
         # この差分が読み取り精度そのものであり、12月の比較根拠になる。
@@ -901,10 +932,9 @@ else:
                                for i in st.session_state.cart],
                 elapsed_sec = st.session_state.get("ocr_elapsed"),
             )
-        # 来店時間（1〜6月の伝票には無いため、7月以降のみ蓄積される）
-        _vt = (st.session_state.get("ocr_header") or {}).get("visit_time")
-        if _vt:
-            dx.log_visit_time(group_id, visit_date, _vt, table_num,
+        # 来店時間ログ（手入力・AI読み取りのどちらでも、来店時間があれば記録する）
+        if _time_final:
+            dx.log_visit_time(group_id, visit_date, _time_final, table_num,
                               nationality, num_people)
 
         st.session_state.ocr_raw     = []
@@ -1139,13 +1169,12 @@ with tab2:
                     with st.form(f"group_form_{gid}"):
                         ec1, ec2, ec3, ec4, ec5, ec6 = st.columns(6)
                         edit_date  = ec1.date_input("来店日", value=pd.to_datetime(row["日付"]).date(), key=f"edate_{gid}")
-                        _cur_slot = str(gdf["来店時間"].iloc[0]) if "来店時間" in gdf.columns and len(gdf) else ""
+                        _cur_time = str(gdf["来店時間"].iloc[0]) if "来店時間" in gdf.columns and len(gdf) else ""
+                        _cur_time = "" if _cur_time.lower() == "nan" else _cur_time
+                        _cur_slot = str(gdf["時間帯"].iloc[0]) if "時間帯" in gdf.columns and len(gdf) else ""
                         _cur_slot = "" if _cur_slot.lower() == "nan" else _cur_slot
-                        _slot_opts = [SLOT_NONE] + VISIT_SLOTS + (
-                            [_cur_slot] if _cur_slot and _cur_slot not in VISIT_SLOTS else [])
-                        edit_slot  = ec2.selectbox("来店時間", _slot_opts,
-                                        index=_slot_opts.index(_cur_slot) if _cur_slot in _slot_opts else 0,
-                                        key=f"eslot_{gid}")
+                        edit_time  = ec2.text_input("来店時間", value=_cur_time, placeholder="例：19:30",
+                                                    key=f"etime_{gid}")
                         edit_tbl   = ec3.text_input("テーブル番号", value=fmt_table(row.get("テーブル番号", "")), key=f"etbl_{gid}")
                         _cur_code = to_nationality_code(row["国籍"])
                         edit_nat   = ec4.selectbox("国籍", NATIONALITY_CODES,
@@ -1210,6 +1239,10 @@ with tab2:
                         full_df = load_data()
                         full_df = full_df[full_df["顧客グループID"] != gid]
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # 来店時間：読めない入力のときは、変更前の値のままにする
+                        _t_new = parse_visit_time(edit_time) if edit_time.strip() else ""
+                        if edit_time.strip() and not _t_new:
+                            _t_new = _cur_time
                         # 編集で行を作り直すため、画像名・割引フラグは元の行から引き継ぐ
                         keep_img  = str(gdf["画像名"].iloc[0]) if "画像名" in gdf.columns and len(gdf) else ""
                         if keep_img.lower() == "nan":
@@ -1231,7 +1264,8 @@ with tab2:
                             "仮登録":         edit_prov,
                             "メモ":           edit_memo,
                             "チラシ持参":     FLYER_MARK if edit_flyer else "",
-                            "来店時間":       "" if edit_slot == SLOT_NONE else edit_slot,
+                            "来店時間":       _t_new,
+                            "時間帯":         time_to_slot(_t_new) if _t_new else _cur_slot,
                         } for r in edited_rows]
                         if "ホテル名" in gdf.columns and len(gdf):   # 廃止した列に値が残っている場合は、編集で消さない
                             _kh = str(gdf["ホテル名"].iloc[0])
@@ -1268,9 +1302,14 @@ with tab2:
                     if img_name and img_name.lower() != "nan":
                         st.caption(f"📷 元画像: {img_name}")
 
-                    _sl = str(gdf["来店時間"].iloc[0]) if "来店時間" in gdf.columns and len(gdf) else ""
-                    if _sl and _sl.lower() != "nan":
-                        st.caption(f"🕐 来店時間: {_sl}")
+                    _tm = str(gdf["来店時間"].iloc[0]) if "来店時間" in gdf.columns and len(gdf) else ""
+                    _sl = str(gdf["時間帯"].iloc[0]) if "時間帯" in gdf.columns and len(gdf) else ""
+                    _tm = "" if _tm.lower() == "nan" else _tm
+                    _sl = "" if _sl.lower() == "nan" else _sl
+                    if _tm:
+                        st.caption(f"🕐 来店時間: {_tm}" + (f"（{_sl}）" if _sl else ""))
+                    elif _sl:
+                        st.caption(f"🕐 時間帯: {_sl}（正確な時刻は未記録）")
                     _fl = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
                     if _fl and _fl.lower() != "nan":
                         st.caption("📄 チラシ持参")
@@ -1380,9 +1419,9 @@ st.caption("🎓 大学ゼミ研究用プロトタイプ ｜ データは yakini
 # 手入力を極力使わず、複数の伝票をまとめて処理する
 # ============================================================
 def add_order_batch(*args, **kwargs):
-    """一括読み取りタブ用：画面の来店時間（HH:MM）を時間帯に直して、注文データの「来店時間」列にも保存する。"""
+    """一括読み取りタブ用：画面の来店時間（HH:MM）を、注文データの「来店時間」「時間帯」の列にも保存する。"""
     _t = st.session_state.get(f"btm_{st.session_state.get('batch_idx', 0)}", "")
-    kwargs.setdefault("visit_slot", time_to_slot(_t))
+    kwargs.setdefault("visit_time", _t)
     return add_order(*args, **kwargs)
 
 
