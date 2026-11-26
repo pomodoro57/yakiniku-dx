@@ -106,6 +106,7 @@ LEGACY_VISIT_SLOTS = {
     "20:00〜21:00": "20時台", "21:00〜22:00": "21時台", "22:00〜23:00": "22時台",
 }
 FLYER_MARK = "あり"             # チラシ持参にチェックがあるときだけ記録する値（なしは空欄）
+REGULAR_MARK = "あり"           # 常連にチェックがあるときだけ記録する値（なしは空欄）
 
 # 生ビール大の価格: 来店日が2026/6/1以前→¥800、6/2以降→¥950（visit_date確定後に動的計算）
 
@@ -121,6 +122,9 @@ MENU_PRESETS = {
         ("特選ハラミ",    2380),   # A5
         ("上ハラミ",      1580),   # A6
         ("特選フィレ",    3380),   # A7
+    ],
+    "🥓 その他の肉": [
+        ("豚ロース",      1500),   # B1
     ],
     "🫀 ホルモン": [
         ("タン",          3000),   # E1
@@ -148,12 +152,17 @@ MENU_PRESETS = {
         ("モヤシナムル", 380),   # G5
         ("焼野菜",       600),   # G6
         ("ネギ",         100),   # G7
+        ("ししとう",     400),   # G8
+        ("玉ねぎ",       600),   # G9
     ],
     "🥣 キムチ": [
         ("キムチ盛合せ", 700),   # F1
         ("白菜キムチ",   500),   # F2
         ("大根キムチ",   500),   # F3
         ("胡瓜キムチ",   500),   # F4
+    ],
+    "🥚 トッピング": [
+        ("玉子",         100),   # D1
     ],
     "🍚 ライス・スープ": [
         ("ライス",       380),   # H1
@@ -165,6 +174,7 @@ MENU_PRESETS = {
         ("冷麺",         800),   # H7
         ("ライス大",     480),   # H8
         ("ライス小",     280),   # H9
+        ("冷麺小",       600),   # H10
     ],
     "🍺 ビール": [
         ("生ビール 380ml",  600),              # J1
@@ -177,6 +187,7 @@ MENU_PRESETS = {
         ("ピーチサワー",          550),  # K3
         ("グレープフルーツサワー", 550),  # K4
         ("カルピスサワー",         550),  # K5
+        ("プレーンサワー",         500),  # K6（10月以降の統一価格）
     ],
     "🥃 ハイボール": [
         ("ブラックニッカクリア", 600),   # M1
@@ -184,6 +195,7 @@ MENU_PRESETS = {
         ("山崎ハイボール",      1400),   # M3
         ("白州ハイボール",      1400),   # M4
         ("知多ハイボール",      1000),   # M5
+        ("ハイボール大",        1000),   # M6
     ],
     "🍷 ワイン": [
         ("グラス(赤)",              800),   # P1
@@ -262,8 +274,14 @@ def save_to_spreadsheet(df):
                 "ページを再読み込みしてからもう一度お試しください。"
             )
             return False
-        ws.clear()
         df_clean = df.fillna("").astype(str)
+        _need_cols = len(df_clean.columns)
+        _need_rows = len(df_clean) + 1
+        if ws.col_count < _need_cols:
+            ws.add_cols(_need_cols - ws.col_count)
+        if ws.row_count < _need_rows:
+            ws.add_rows(_need_rows - ws.row_count)
+        ws.clear()
         ws.update([df_clean.columns.tolist()] + df_clean.values.tolist())
         return True
     except Exception as e:
@@ -306,7 +324,7 @@ def time_to_slot(hhmm):
 ORDER_COLUMNS = [
     "日付", "テーブル番号", "国籍", "人数", "メニュー名", "数量", "金額",
     "来店経路", "顧客グループID", "登録日時", "画像名", "割引10%", "仮登録", "メモ",
-    "チラシ持参", "来店時間", "時間帯",
+    "チラシ持参", "来店時間", "時間帯", "常連",
 ]
 
 
@@ -324,9 +342,9 @@ def _normalize_orders(df):
         df["仮登録"] = False        # 既存行は本登録扱い
     if "メモ" not in df.columns:
         df["メモ"] = ""             # 既存行はメモ空
-    for col in ["チラシ持参", "来店時間", "時間帯"]:
+    for col in ["チラシ持参", "来店時間", "時間帯", "常連"]:
         if col not in df.columns:
-            df[col] = ""            # 既存行はチラシなし・来店時間なし（空欄）
+            df[col] = ""            # 既存行はチラシなし・来店時間なし・常連チェックなし（空欄）
     for col in ["人数", "数量", "金額"]:
         if col not in df.columns:
             df[col] = 0
@@ -335,8 +353,9 @@ def _normalize_orders(df):
         df[col] = (df[col].astype(str).str.strip().str.lower()
                    .map({"true": True, "false": False, "1": True, "0": False})
                    .fillna(False))
-    for col in ["画像名", "メモ", "チラシ持参", "来店時間", "時間帯"]:
+    for col in ["画像名", "メモ", "チラシ持参", "来店時間", "時間帯", "常連"]:
         df[col] = df[col].fillna("")
+    df["常連"] = df["常連"].astype(str).str.strip().replace("nan", "")
     # 来店時間（正確な時刻 HH:MM）と、時間帯（19時台）をそろえる
     _t = df["来店時間"].astype(str).str.strip().replace(LEGACY_VISIT_SLOTS)   # 旧表記（19:00〜20:00）→ 19時台
     _slot = df["時間帯"].astype(str).str.strip().replace(LEGACY_VISIT_SLOTS)
@@ -396,7 +415,7 @@ def save_data(df):
 
 def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
               image_name="", discount_10=False, provisional=False, memo="",
-              flyer="", visit_time=""):
+              flyer="", visit_time="", regular=""):
     load_data.clear()  # 他端末の最新記録を取り込んでから追記する
     df = load_data()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -420,10 +439,16 @@ def add_order(visit_date, table_num, nationality, num_people, menu_items, visit_
             "チラシ持参":     flyer,
             "来店時間":       _vt,
             "時間帯":         time_to_slot(_vt),
+            "常連":           regular,
         }
         for menu_name, quantity, price in menu_items
     ]
     save_data(pd.concat([df, pd.DataFrame(rows)], ignore_index=True))
+
+
+def is_regular(value):
+    """常連列の値が「あり」かどうか（空欄・NaN は常連ではない）。"""
+    return str(value).strip() == REGULAR_MARK
 
 
 def delete_group(group_id):
@@ -658,9 +683,10 @@ st.caption("大学ゼミ研究用 | 外国人観光客向け注文データ分�
 st.sidebar.header("📝 注文入力")
 st.sidebar.markdown("---")
 
-# 保存した直後は、チラシ持参のチェックと来店時間を空に戻す（次の伝票に持ち越さない）
+# 保存した直後は、チラシ持参・常連のチェックと来店時間を空に戻す（次の伝票に持ち越さない）
 if st.session_state.pop("_reset_sidebar", False):
     st.session_state["sidebar_flyer"] = False
+    st.session_state["sidebar_regular"] = False
     st.session_state["sidebar_time"] = ""
 
 st.sidebar.subheader("来店情報")
@@ -682,6 +708,8 @@ with st.sidebar.form("sidebar_form"):
                               help="伝票に「10%off」と書かれている場合にチェック")
     flyer_on = st.checkbox("📄 チラシ持参", key="sidebar_flyer",
                            help="ホテルのチラシを持って来店したグループにチェック")
+    regular_on = st.checkbox("⭐ 常連", key="sidebar_regular",
+                             help="お店の常連さんのグループにチェック")
     st.form_submit_button("反映")
 
 st.sidebar.markdown("---")
@@ -919,7 +947,8 @@ else:
         add_order(visit_date, table_num, nationality, num_people, menu_items, visit_route, group_id,
                   image_name=_img_name, discount_10=discount_10,
                   flyer=(FLYER_MARK if flyer_on else ""),
-                  visit_time=_time_final)
+                  visit_time=_time_final,
+                  regular=(REGULAR_MARK if regular_on else ""))
 
         # 【最重要】AIの出力と人の修正結果を両方記録する。
         # この差分が読み取り精度そのものであり、12月の比較根拠になる。
@@ -1056,21 +1085,28 @@ with tab2:
         )
         # 仮登録グループのID（見出しの🚩と絞り込みに使う）
         _prov_gids = set(df.loc[df["仮登録"].apply(is_provisional), "顧客グループID"])
+        # 常連グループのID（見出しの⭐と絞り込みに使う）
+        _reg_gids = set(df.loc[df["常連"].apply(is_regular), "顧客グループID"])
 
         # --- 絞り込み（国籍・仮登録）→ 並び替え → 表示 の順 ---
         # 国籍は旧国名・新コードが混在しうるので、6区分コードに揃えて絞る
-        f_col1, f_col2 = st.columns([3, 1])
+        f_col1, f_col2, f_col3 = st.columns([3, 1, 1])
         tab2_nat_filter = f_col1.multiselect(
             "🔍 国籍フィルター", options=NATIONALITY_CODES,
             format_func=lambda c: nationality_display(c), key="tab2_nat_filter")
         f_col2.markdown("<div style='height: 1.9rem'></div>", unsafe_allow_html=True)
         show_only_provisional = f_col2.checkbox(
             f"🚩 仮登録のみ表示（{len(_prov_gids)} 件）", key="filter_provisional")
+        f_col3.markdown("<div style='height: 1.9rem'></div>", unsafe_allow_html=True)
+        show_only_regular = f_col3.checkbox(
+            f"⭐ 常連のみ表示（{len(_reg_gids)} 件）", key="filter_regular")
         if tab2_nat_filter:
             group_summary = group_summary[
                 group_summary["国籍"].apply(to_nationality_code).isin(tab2_nat_filter)]
         if show_only_provisional:
             group_summary = group_summary[group_summary["顧客グループID"].isin(_prov_gids)]
+        if show_only_regular:
+            group_summary = group_summary[group_summary["顧客グループID"].isin(_reg_gids)]
 
         sort_col1, sort_col2 = st.columns(2)
         sort_key = sort_col1.selectbox(
@@ -1093,7 +1129,8 @@ with tab2:
 
         # --- ページ送り：今のページの TAB2_PAGE_SIZE グループだけ描画する ---
         # フィルター・並び替えが変わったら1ページ目に戻す（編集・保存・削除では同じページのまま）
-        _view_sig = (tuple(sorted(tab2_nat_filter)), show_only_provisional, sort_key, sort_order)
+        _view_sig = (tuple(sorted(tab2_nat_filter)), show_only_provisional, show_only_regular,
+                     sort_key, sort_order)
         if st.session_state.get("tab2_view_sig") != _view_sig:
             st.session_state["tab2_view_sig"] = _view_sig
             st.session_state["tab2_page"] = 1
@@ -1147,11 +1184,12 @@ with tab2:
             # 割引グループは一覧の見出しでも分かるようにタグを付ける
             disc_tag = "🏷️" if gid in _disc_gids else ""
             prov_tag = "🚩仮登録　" if gid in _prov_gids else ""
+            reg_tag  = "⭐常連　" if gid in _reg_gids else ""
             # 画像名は展開しなくても見えるよう見出しの末尾（IDの横）に出す。空なら付けない
             _img = str(row.get("画像名", "")).strip()
             img_tag = f"　📷 {_img}" if _img and _img.lower() != "nan" else ""
             with st.expander(
-                f"{prov_tag}📅 {row['日付']}　{tbl}🌍 {row['国籍']}　👥 {row['人数']}名　"
+                f"{prov_tag}{reg_tag}📅 {row['日付']}　{tbl}🌍 {row['国籍']}　👥 {row['人数']}名　"
                 f"💴 ¥{int(row['合計金額']):,}{disc_tag}　[ID: {gid}]{img_tag}"
             ):
                 gdf = _page_gdfs.get(gid, df.iloc[0:0]).copy()
@@ -1214,10 +1252,11 @@ with tab2:
                         manual_add_price = hc2.number_input("単価（円）", min_value=0, max_value=1000000, value=0, step=10, key=f"emanual_price_{gid}")
                         manual_add_qty   = hc3.number_input("数量", min_value=1, max_value=99, value=1, key=f"emanual_qty_{gid}")
 
-                        st.markdown("**チラシ**")
+                        st.markdown("**チラシ・常連**")
                         _cur_flyer = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
                         _cur_flyer = "" if _cur_flyer.lower() == "nan" else _cur_flyer
                         edit_flyer = st.checkbox("📄 チラシ持参", value=bool(_cur_flyer), key=f"eflyer_{gid}")
+                        edit_reg = st.checkbox("⭐ 常連", value=(gid in _reg_gids), key=f"ereg_{gid}")
 
                         st.markdown("**仮登録・メモ**")
                         edit_prov = st.checkbox("🚩 仮登録のまま（直し終わったら外して保存 → 本登録になり集計に入ります）",
@@ -1266,6 +1305,7 @@ with tab2:
                             "チラシ持参":     FLYER_MARK if edit_flyer else "",
                             "来店時間":       _t_new,
                             "時間帯":         time_to_slot(_t_new) if _t_new else _cur_slot,
+                            "常連":           REGULAR_MARK if edit_reg else "",
                         } for r in edited_rows]
                         if "ホテル名" in gdf.columns and len(gdf):   # 廃止した列に値が残っている場合は、編集で消さない
                             _kh = str(gdf["ホテル名"].iloc[0])
@@ -1313,6 +1353,8 @@ with tab2:
                     _fl = str(gdf["チラシ持参"].iloc[0]) if "チラシ持参" in gdf.columns and len(gdf) else ""
                     if _fl and _fl.lower() != "nan":
                         st.caption("📄 チラシ持参")
+                    if gid in _reg_gids:
+                        st.caption("⭐ 常連")
 
                     bc1, bc2 = st.columns(2)
                     if bc1.button("✏️ 編集", key=f"edit_group_{gid}"):
@@ -1408,6 +1450,25 @@ with tab5:
                 d = avg_df.copy()
                 d["客単価(円/人)"] = d["客単価(円/人)"].apply(lambda x: f"¥{x:,}")
                 st.dataframe(d, use_container_width=True)
+
+        # 常連・一般の比較（仮登録は除外、割引は反映）
+        st.markdown("---")
+        st.markdown("#### ⭐ 常連・一般の比較")
+        _rdf = with_effective_amount(exclude_provisional(df))
+        if _rdf.empty:
+            st.info("集計できるデータがありません。")
+        else:
+            _rdf["区分"] = _rdf["常連"].apply(lambda v: "常連" if is_regular(v) else "一般（チェックなし）")
+            _g = _rdf.groupby(["顧客グループID", "区分", "人数"]).agg(合計金額=("実効金額", "sum")).reset_index()
+            _g["客単価"] = _g["合計金額"] / _g["人数"]
+            _cmp = _g.groupby("区分").agg(
+                グループ数=("顧客グループID", "nunique"),
+                合計人数=("人数", "sum"),
+                平均客単価=("客単価", "mean"),
+            ).reset_index()
+            _cmp["平均客単価"] = _cmp["平均客単価"].round(0).astype(int).apply(lambda x: f"¥{x:,} / 人")
+            st.dataframe(_cmp, use_container_width=True, hide_index=True)
+            st.caption("常連チェックを始める前の伝票はすべて「一般（チェックなし）」に入ります。")
 
 # フッター
 st.markdown("---")
